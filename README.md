@@ -193,6 +193,89 @@ go test -cover ./...
 go build -o frugalai ./cmd/frugalai
 ```
 
+## Docker
+
+### Building the Image
+
+```bash
+docker build -t frugalai .
+```
+
+### Running the Container
+
+**Basic usage:**
+```bash
+docker run -d \
+  --name frugalai \
+  -p 8080:8080 \
+  -e FRUGALAI_API_KEY="your-openrouter-api-key" \
+  frugalai
+```
+
+**With custom options:**
+```bash
+docker run -d \
+  --name frugalai \
+  -p 9000:9000 \
+  -e FRUGALAI_API_KEY="your-openrouter-api-key" \
+  -e FRUGALAI_PORT=9000 \
+  -e FRUGALAI_MIN_PARAMS=7000000000 \
+  -e FRUGALAI_LOG_LEVEL=debug \
+  frugalai
+```
+
+### Using Docker Compose
+
+Create a `docker-compose.yml` file:
+
+```yaml
+version: '3.8'
+
+services:
+  frugalai:
+    image: frugalai
+    container_name: frugalai
+    ports:
+      - "8080:8080"
+    environment:
+      - FRUGALAI_API_KEY=${FRUGALAI_API_KEY}
+      - FRUGALAI_PORT=8080
+      - FRUGALAI_MIN_PARAMS=0
+      - FRUGALAI_LOG_LEVEL=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+```
+
+Run with Docker Compose:
+```bash
+# Start the service
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the service
+docker-compose down
+```
+
+### Volume Mounts
+
+For custom configuration or caching, mount a volume:
+
+```bash
+docker run -d \
+  --name frugalai \
+  -p 8080:8080 \
+  -v ${PWD}/data:/home/appuser/.local/share/frugalai \
+  -e FRUGALAI_API_KEY="your-openrouter-api-key" \
+  frugalai
+```
+
 ## License
 
 MIT License
