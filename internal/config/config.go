@@ -40,6 +40,9 @@ type Config struct {
 	// Prefer specific model architectures
 	PreferredArchitectures []string
 
+	// Top weekly models to prioritize
+	TopWeeklyModels []string
+
 	// Model index to use from top candidates (0-based, -1 for auto/interactive)
 	ModelIndex int
 
@@ -50,18 +53,26 @@ type Config struct {
 // LoadFromEnv loads configuration from environment variables (used when CLI is not available)
 func LoadFromEnv() *Config {
 	cfg := &Config{
-		Port:                8080,
-		MinParams:           0,
-		MinPopularity:       0,
-		EnableOpenAI:        true,
-		EnableAnthropic:     true,
-		OpenAIPath:          "/v1",
-		AnthropicPath:       "/v1",
-		LogLevel:            "info",
-		CacheTTL:            300,
+		Port:                   8080,
+		MinParams:              0,
+		MinPopularity:          0,
+		EnableOpenAI:           true,
+		EnableAnthropic:        true,
+		OpenAIPath:             "/v1",
+		AnthropicPath:          "/v1",
+		LogLevel:               "info",
+		CacheTTL:               300,
 		PreferredArchitectures: []string{},
-		ModelIndex:          -1,
-		NumCandidates:       10,
+		TopWeeklyModels: []string{
+			"stepfun/step-3.5-flash:free",
+			"qwen/qwen3-next-80b-a3b-instruct:free",
+			"tngtech/deepseek-r1t2-chimera:free",
+			"nvidia/nemotron-3-nano-30b-a3b:free",
+			"deepseek/deepseek-r1-0528:free",
+			"google/gemma-3-27b-it:free",
+		},
+		ModelIndex:    -1,
+		NumCandidates: 10,
 	}
 
 	// Environment variables
@@ -96,6 +107,9 @@ func LoadFromEnv() *Config {
 	}
 	if v := os.Getenv("FRUGALAI_PREFERRED_ARCH"); v != "" {
 		cfg.PreferredArchitectures = splitAndTrim(v)
+	}
+	if v := os.Getenv("FRUGALAI_TOP_WEEKLY"); v != "" {
+		cfg.TopWeeklyModels = splitAndTrim(v)
 	}
 	if v := os.Getenv("FRUGALAI_MODEL_INDEX"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {

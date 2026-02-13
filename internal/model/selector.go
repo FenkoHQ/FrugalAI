@@ -110,6 +110,11 @@ func (s *Selector) calculateScore(model openrouter.Model) float64 {
 		score += 0.1
 	}
 
+	// Top Weekly bonus (weight: 0.5 - highly prioritized)
+	if s.isTopWeekly(model.ID) {
+		score += 0.5
+	}
+
 	// Quality bonus based on known good model names
 	score += s.getModelQualityBonus(model.Name, model.ID)
 
@@ -162,6 +167,21 @@ func (s *Selector) isPreferredArchitecture(modality, tokenizer string) bool {
 	return false
 }
 
+// isTopWeekly checks if the model is in the top weekly list
+func (s *Selector) isTopWeekly(id string) bool {
+	if len(s.config.TopWeeklyModels) == 0 {
+		return false
+	}
+
+	idLower := strings.ToLower(id)
+	for _, top := range s.config.TopWeeklyModels {
+		if idLower == strings.ToLower(top) {
+			return true
+		}
+	}
+	return false
+}
+
 // getModelQualityBonus adds a bonus for known high-quality models
 func (s *Selector) getModelQualityBonus(name, id string) float64 {
 	bonus := 0.0
@@ -176,6 +196,7 @@ func (s *Selector) getModelQualityBonus(name, id string) float64 {
 	}{
 		{[]string{"claude", "anthropic"}, 0.15},
 		{[]string{"gpt-", "openai"}, 0.12},
+		{[]string{"stepfun"}, 0.15},
 		{[]string{"gemini", "google"}, 0.10},
 		{[]string{"mistral", "mixtral"}, 0.08},
 		{[]string{"llama", "meta"}, 0.08},

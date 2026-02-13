@@ -4,11 +4,11 @@ import "time"
 
 // Architecture represents model architecture information
 type Architecture struct {
-	Modality          string   `json:"modality"`
-	InputModalities   []string `json:"input_modalities"`
-	OutputModalities  []string `json:"output_modalities"`
-	Tokenizer         string   `json:"tokenizer"`
-	InstructType      *string  `json:"instruct_type"`
+	Modality         string   `json:"modality"`
+	InputModalities  []string `json:"input_modalities"`
+	OutputModalities []string `json:"output_modalities"`
+	Tokenizer        string   `json:"tokenizer"`
+	InstructType     *string  `json:"instruct_type"`
 }
 
 // Model represents an OpenRouter model
@@ -61,9 +61,9 @@ type ResponseFormat struct {
 
 // ChatChoice represents a choice in the chat response
 type ChatChoice struct {
-	Index        int          `json:"index"`
-	Message      ChatMessage  `json:"message"`
-	FinishReason string       `json:"finish_reason"`
+	Index        int         `json:"index"`
+	Message      ChatMessage `json:"message"`
+	FinishReason string      `json:"finish_reason"`
 }
 
 // Usage represents token usage
@@ -106,23 +106,23 @@ type ContentBlock struct {
 
 // AnthropicRequest represents an Anthropic-style request
 type AnthropicRequest struct {
-	Model     string              `json:"model"`
-	MaxTokens int                 `json:"max_tokens"`
-	Messages  []AnthropicMessage  `json:"messages"`
-	System    string              `json:"system,omitempty"`
-	Temperature float64           `json:"temperature,omitempty"`
-	TopP     float64              `json:"top_p,omitempty"`
-	Stream   bool                 `json:"stream,omitempty"`
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	Messages    []AnthropicMessage `json:"messages"`
+	System      string             `json:"system,omitempty"`
+	Temperature float64            `json:"temperature,omitempty"`
+	TopP        float64            `json:"top_p,omitempty"`
+	Stream      bool               `json:"stream,omitempty"`
 }
 
 // AnthropicResponse represents an Anthropic-style response
 type AnthropicResponse struct {
-	ID      string           `json:"id"`
-	Type    string           `json:"type"`
-	Role    string           `json:"role"`
-	Content []ContentBlock   `json:"content"`
-	StopReason string        `json:"stop_reason"`
-	Model      string        `json:"model"`
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	Role       string         `json:"role"`
+	Content    []ContentBlock `json:"content"`
+	StopReason string         `json:"stop_reason"`
+	Model      string         `json:"model"`
 	Usage      AnthropicUsage `json:"usage"`
 }
 

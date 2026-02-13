@@ -261,9 +261,9 @@ func (h *Handler) convertToAnthropic(resp *openrouter.ChatResponse) openrouter.A
 	}
 
 	return openrouter.AnthropicResponse{
-		ID:         resp.ID,
-		Type:       "message",
-		Role:       "assistant",
+		ID:   resp.ID,
+		Type: "message",
+		Role: "assistant",
 		Content: []openrouter.ContentBlock{
 			{
 				Type: "text",
@@ -291,7 +291,7 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, message string) 
 	w.WriteHeader(status)
 
 	errorResp := map[string]interface{}{
-		"type":  "error",
+		"type": "error",
 		"error": map[string]interface{}{
 			"type":    "invalid_request_error",
 			"message": message,
@@ -303,11 +303,11 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, message string) 
 // ConvertOpenAIToAnthropic converts OpenAI format to Anthropic format
 func ConvertOpenAIToAnthropic(openaiReq *openrouter.ChatRequest) *openrouter.AnthropicRequest {
 	req := &openrouter.AnthropicRequest{
-		Model:         openaiReq.Model,
-		MaxTokens:     openaiReq.MaxTokens,
-		Temperature:   openaiReq.Temperature,
-		TopP:          openaiReq.TopP,
-		Stream:        openaiReq.Stream,
+		Model:       openaiReq.Model,
+		MaxTokens:   openaiReq.MaxTokens,
+		Temperature: openaiReq.Temperature,
+		TopP:        openaiReq.TopP,
+		Stream:      openaiReq.Stream,
 	}
 
 	for _, msg := range openaiReq.Messages {

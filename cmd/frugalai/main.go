@@ -28,10 +28,10 @@ var (
 
 func main() {
 	app := &cli.App{
-		Name:     "frugalai",
-		Usage:    "Intelligent LLM proxy that routes to the best free model on OpenRouter",
-		Version:  "1.0.0",
-		Before:   setupLogging,
+		Name:    "frugalai",
+		Usage:   "Intelligent LLM proxy that routes to the best free model on OpenRouter",
+		Version: "1.0.0",
+		Before:  setupLogging,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "api-key",
@@ -60,14 +60,14 @@ func main() {
 				EnvVars: []string{"FRUGALAI_MIN_POPULARITY"},
 			},
 			&cli.BoolFlag{
-				Name:    "enable-openai",
-				Usage:   "Enable OpenAI-compatible API (default: true)",
-				Value:   true,
+				Name:  "enable-openai",
+				Usage: "Enable OpenAI-compatible API (default: true)",
+				Value: true,
 			},
 			&cli.BoolFlag{
-				Name:    "enable-anthropic",
-				Usage:   "Enable Anthropic-compatible API (default: true)",
-				Value:   true,
+				Name:  "enable-anthropic",
+				Usage: "Enable Anthropic-compatible API (default: true)",
+				Value: true,
 			},
 			&cli.StringFlag{
 				Name:  "openai-path",
@@ -150,19 +150,19 @@ func runHeadless(c *cli.Context) error {
 
 	// Build config from CLI
 	cfg := &config.Config{
-		APIKey:                c.String("api-key"),
-		Port:                  c.Int("port"),
-		MinParams:             c.Int("min-params"),
-		MinPopularity:         c.Int("min-popularity"),
-		EnableOpenAI:          c.Bool("enable-openai"),
-		EnableAnthropic:       c.Bool("enable-anthropic"),
-		OpenAIPath:            c.String("openai-path"),
-		AnthropicPath:         c.String("anthropic-path"),
-		LogLevel:              c.String("log-level"),
-		CacheTTL:              c.Int("cache-ttl"),
+		APIKey:                 c.String("api-key"),
+		Port:                   c.Int("port"),
+		MinParams:              c.Int("min-params"),
+		MinPopularity:          c.Int("min-popularity"),
+		EnableOpenAI:           c.Bool("enable-openai"),
+		EnableAnthropic:        c.Bool("enable-anthropic"),
+		OpenAIPath:             c.String("openai-path"),
+		AnthropicPath:          c.String("anthropic-path"),
+		LogLevel:               c.String("log-level"),
+		CacheTTL:               c.Int("cache-ttl"),
 		PreferredArchitectures: splitAndTrim(c.String("preferred-arch")),
-		ModelIndex:            c.Int("model-index"),
-		NumCandidates:         c.Int("num-candidates"),
+		ModelIndex:             c.Int("model-index"),
+		NumCandidates:          c.Int("num-candidates"),
 	}
 
 	// Create OpenRouter client
@@ -392,16 +392,16 @@ func candidatesHandler(selector *model.Selector) http.HandlerFunc {
 		}
 
 		type Candidate struct {
-			Index      int      `json:"index"`
-			ID         string   `json:"id"`
-			Name       string   `json:"name"`
-			Modality   string   `json:"modality"`
-			Tokenizer  string   `json:"tokenizer"`
-			ContextLen int      `json:"context_length"`
-			Params     int      `json:"params"`
-			Popularity int      `json:"popularity"`
-			IsCurrent  bool     `json:"is_current"`
-			Failures   int      `json:"failures"`
+			Index      int    `json:"index"`
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			Modality   string `json:"modality"`
+			Tokenizer  string `json:"tokenizer"`
+			ContextLen int    `json:"context_length"`
+			Params     int    `json:"params"`
+			Popularity int    `json:"popularity"`
+			IsCurrent  bool   `json:"is_current"`
+			Failures   int    `json:"failures"`
 		}
 
 		result := []Candidate{}
