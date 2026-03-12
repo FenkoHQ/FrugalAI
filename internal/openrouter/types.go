@@ -21,6 +21,7 @@ type Model struct {
 	ContextLength int          `json:"context_length"`
 	Popularity    int          `json:"popularity,omitempty"`
 	Params        int          `json:"params,omitempty"`
+	Created       int64        `json:"created,omitempty"`
 }
 
 // Pricing represents model pricing

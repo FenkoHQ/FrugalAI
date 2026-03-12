@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mosajjal/frugalai/internal/config"
 	"github.com/mosajjal/frugalai/internal/openrouter"
@@ -59,14 +60,22 @@ func (s *Selector) filterModels(models []openrouter.Model) []openrouter.Model {
 	filtered := []openrouter.Model{}
 
 	for _, model := range models {
+		// Skip meta-routers — these aren't real models, they randomly dispatch
+		// to other free models (e.g. openrouter/free)
+		if strings.HasSuffix(model.ID, "/free") && !strings.Contains(model.ID, ":free") {
+			continue
+		}
+
 		// Check minimum parameter count
 		if s.config.MinParams > 0 && model.Params < s.config.MinParams {
 			continue
 		}
 
-		// Check minimum popularity
+		// Check minimum popularity — exempt stealth models (recently published from known quality providers)
 		if s.config.MinPopularity > 0 && model.Popularity < s.config.MinPopularity {
-			continue
+			if !s.isStealthModel(model) {
+				continue
+			}
 		}
 
 		filtered = append(filtered, model)
@@ -118,13 +127,20 @@ func (s *Selector) calculateScore(model openrouter.Model) float64 {
 	// Quality bonus based on known good model names
 	score += s.getModelQualityBonus(model.Name, model.ID)
 
+	// Stealth model bonus: free models with very low popularity from known providers
+	// These are usually quiet launches of excellent models
+	if s.isStealthModel(model) {
+		score += 0.4
+	}
+
 	return score
 }
 
 // normalizePopularity normalizes popularity to 0-1 range
 func (s *Selector) normalizePopularity(popularity int) float64 {
 	if popularity <= 0 {
-		return 0.1
+		// Unknown/new model — don't penalize, assume mid-range
+		return 0.5
 	}
 	// Logarithmic scale: log(1) = 0, log(1000000) ≈ 13.8
 	normalized := math.Log(float64(popularity)) / math.Log(1000000)
@@ -134,7 +150,8 @@ func (s *Selector) normalizePopularity(popularity int) float64 {
 // normalizeParams normalizes parameter count to 0-1 range
 func (s *Selector) normalizeParams(params int) float64 {
 	if params <= 0 {
-		return 0.1
+		// Unknown params — don't penalize, assume mid-range
+		return 0.5
 	}
 	// Linear scale: 0 = 0, 70B+ = 1
 	normalized := float64(params) / 70_000_000_000
@@ -182,6 +199,37 @@ func (s *Selector) isTopWeekly(id string) bool {
 	return false
 }
 
+// stealthMaxAge is the maximum age for a model to be considered a "stealth" launch.
+// Models published within this window from a known provider get boosted.
+const stealthMaxAge = 7 * 24 * time.Hour
+
+// knownQualityProviders are model ID prefixes for reputable providers whose
+// stealth (recently published) free models should be prioritized.
+var knownQualityProviders = []string{
+	"google/", "anthropic/", "openai/", "meta-llama/", "mistralai/",
+	"deepseek/", "qwen/", "stepfun/", "nvidia/", "cohere/",
+	"microsoft/", "xiaomi/", "allenai/", "openrouter/",
+}
+
+// isStealthModel returns true if the model is a recent launch (within stealthMaxAge)
+// from a known quality provider. These are usually quiet drops of excellent models.
+func (s *Selector) isStealthModel(model openrouter.Model) bool {
+	if model.Created == 0 {
+		return false
+	}
+	age := time.Since(time.Unix(model.Created, 0))
+	if age > stealthMaxAge {
+		return false
+	}
+	idLower := strings.ToLower(model.ID)
+	for _, prefix := range knownQualityProviders {
+		if strings.HasPrefix(idLower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // getModelQualityBonus adds a bonus for known high-quality models
 func (s *Selector) getModelQualityBonus(name, id string) float64 {
 	bonus := 0.0
@@ -208,6 +256,7 @@ func (s *Selector) getModelQualityBonus(name, id string) float64 {
 		{[]string{"nvidia", "nemotron"}, 0.07},
 		{[]string{"olmo", "allenai"}, 0.06},
 		{[]string{"trinity", "arcee"}, 0.06},
+		{[]string{"openrouter"}, 0.10},
 	}
 
 	for _, indicator := range qualityIndicators {
