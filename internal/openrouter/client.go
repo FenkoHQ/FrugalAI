@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -136,8 +137,13 @@ func (c *Client) GetFreeModels() ([]Model, error) {
 
 // isFreeModel checks if a model is free
 func (c *Client) isFreeModel(model Model) bool {
-	// Check if pricing is zero (free)
-	return model.Pricing.Prompt == "0" && model.Pricing.Completion == "0"
+	// Parse pricing as float to handle "0", "0.00", "0.000000", etc.
+	prompt, err1 := strconv.ParseFloat(model.Pricing.Prompt, 64)
+	completion, err2 := strconv.ParseFloat(model.Pricing.Completion, 64)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return prompt == 0 && completion == 0
 }
 
 // ChatCompletion sends a chat completion request with timeout tracking
