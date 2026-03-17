@@ -204,6 +204,13 @@ func (c *Client) ChatCompletionWithTimeout(req *ChatRequest, timeout time.Durati
 
 // StreamChatCompletion sends a streaming chat completion request
 func (c *Client) StreamChatCompletion(req *ChatRequest) (<-chan StreamChunk, <-chan error) {
+	return c.StreamChatCompletionWithContext(context.Background(), req)
+}
+
+// StreamChatCompletionWithContext sends a streaming chat completion request with context support.
+// The context controls the HTTP request lifecycle — cancelling it aborts the connection.
+// Timeouts are wrapped as TimeoutError for consistent handling by callers.
+func (c *Client) StreamChatCompletionWithContext(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, <-chan error) {
 	chunkChan := make(chan StreamChunk, 10)
 	errChan := make(chan error, 1)
 
@@ -218,7 +225,7 @@ func (c *Client) StreamChatCompletion(req *ChatRequest) (<-chan StreamChunk, <-c
 			return
 		}
 
-		httpReq, err := http.NewRequest("POST", baseURL+chatEndpoint, bytes.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", baseURL+chatEndpoint, bytes.NewReader(body))
 		if err != nil {
 			errChan <- fmt.Errorf("failed to create request: %w", err)
 			return
@@ -231,6 +238,14 @@ func (c *Client) StreamChatCompletion(req *ChatRequest) (<-chan StreamChunk, <-c
 
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+				errChan <- &TimeoutError{Duration: 0}
+				return
+			}
+			if urlErr, ok := err.(*url.Error); ok && urlErr.Timeout() {
+				errChan <- &TimeoutError{Duration: 0}
+				return
+			}
 			errChan <- fmt.Errorf("failed to send request: %w", err)
 			return
 		}
@@ -253,10 +268,18 @@ func (c *Client) StreamChatCompletion(req *ChatRequest) (<-chan StreamChunk, <-c
 				if err == io.EOF {
 					break
 				}
+				if ctx.Err() != nil {
+					errChan <- &TimeoutError{Duration: 0}
+					return
+				}
 				errChan <- fmt.Errorf("failed to decode chunk: %w", err)
 				return
 			}
-			chunkChan <- chunk
+			select {
+			case chunkChan <- chunk:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 

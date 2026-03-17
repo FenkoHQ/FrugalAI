@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,7 +135,7 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("chat completion failed after %d attempts: %v", maxRetries, lastErr))
 }
 
-// handleStream handles streaming requests
+// handleStream handles streaming requests with retry on failure
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, anthropicReq map[string]interface{}) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -142,30 +143,111 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, anthropic
 		return
 	}
 
+	// Convert to OpenAI format once — only model changes per attempt
+	openaiReq, err := openai.ConvertAnthropicToOpenAI(anthropicReq)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("failed to convert request: %v", err))
+		return
+	}
+
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		openaiReq.Model = h.getCurrentModelID()
+
+		ctx, cancel := context.WithCancel(r.Context())
+		chunkChan, errChan := h.client.StreamChatCompletionWithContext(ctx, openaiReq)
+
+		// Wait for first chunk or error with a first-byte timeout
+		firstByteTimer := time.NewTimer(15 * time.Second)
+
+		select {
+		case chunk, ok := <-chunkChan:
+			firstByteTimer.Stop()
+			if !ok {
+				// Stream closed without data — check for error
+				cancel()
+				if err := <-errChan; err != nil {
+					if h.handleStreamRetry(openaiReq.Model, err, attempt, maxRetries) {
+						continue
+					}
+					h.writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				h.commitStreamHeaders(w)
+				h.writeAnthropicEvent(w, "message_stop", map[string]interface{}{"type": "message_stop"})
+				flusher.Flush()
+				return
+			}
+
+			// Got first chunk — commit headers and forward the stream
+			h.commitStreamHeaders(w)
+			eventIndex := 0
+			if len(chunk.Choices) > 0 {
+				h.writeAnthropicStreamEvent(w, chunk.Choices[0].Message.Content, eventIndex)
+				eventIndex++
+			}
+			flusher.Flush()
+			h.forwardAnthropicStream(w, flusher, r, chunkChan, errChan, openaiReq.Model, cancel, eventIndex)
+			return
+
+		case err := <-errChan:
+			firstByteTimer.Stop()
+			cancel()
+			if err != nil {
+				if h.handleStreamRetry(openaiReq.Model, err, attempt, maxRetries) {
+					continue
+				}
+				h.writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			return
+
+		case <-firstByteTimer.C:
+			cancel()
+			if h.recordTimeout(openaiReq.Model) {
+				log.Printf("[INFO] Model %s stream timed out, switching (attempt %d/%d)", openaiReq.Model, attempt+1, maxRetries)
+				continue
+			}
+			h.writeError(w, http.StatusGatewayTimeout, "stream timed out")
+			return
+
+		case <-r.Context().Done():
+			firstByteTimer.Stop()
+			cancel()
+			return
+		}
+	}
+
+	h.writeError(w, http.StatusBadGateway, fmt.Sprintf("streaming failed after %d attempts", maxRetries))
+}
+
+// commitStreamHeaders writes the SSE headers once we're committed to a stream
+func (h *Handler) commitStreamHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+}
 
-	// Convert to OpenAI format
-	openaiReq, err := openai.ConvertAnthropicToOpenAI(anthropicReq)
-	if err != nil {
-		h.writeAnthropicEvent(w, "error", map[string]string{"error": err.Error()})
-		flusher.Flush()
-		return
-	}
-
-	// Get current model - always replace with proxy model
-	modelID := h.getCurrentModelID()
-	openaiReq.Model = modelID
-
-	chunkChan, errChan := h.client.StreamChatCompletion(openaiReq)
-
-	eventIndex := 0
+// forwardAnthropicStream forwards remaining chunks from an established stream to the client
+func (h *Handler) forwardAnthropicStream(w http.ResponseWriter, flusher http.Flusher, r *http.Request, chunkChan <-chan openrouter.StreamChunk, errChan <-chan error, modelID string, cancel context.CancelFunc, eventIndex int) {
+	defer cancel()
 	for {
 		select {
 		case chunk, ok := <-chunkChan:
 			if !ok {
+				select {
+				case err := <-errChan:
+					if err != nil {
+						if apiErr := h.tryParseAPIError(err); apiErr != nil {
+							h.recordFailure(modelID, apiErr.Code)
+						}
+						h.writeAnthropicEvent(w, "error", map[string]string{"error": err.Error()})
+						flusher.Flush()
+						return
+					}
+				default:
+				}
 				h.writeAnthropicEvent(w, "message_stop", map[string]interface{}{"type": "message_stop"})
 				flusher.Flush()
 				return
@@ -175,20 +257,30 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, anthropic
 				eventIndex++
 			}
 			flusher.Flush()
-		case err := <-errChan:
-			if err != nil {
-				// Try to parse as API error
-				if apiErr := h.tryParseAPIError(err); apiErr != nil {
-					h.recordFailure(openaiReq.Model, apiErr.Code)
-				}
-				h.writeAnthropicEvent(w, "error", map[string]string{"error": err.Error()})
-				flusher.Flush()
-				return
-			}
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+// handleStreamRetry checks if a stream error is retryable and switches models if so
+func (h *Handler) handleStreamRetry(modelID string, err error, attempt, maxRetries int) bool {
+	var timeoutErr *openrouter.TimeoutError
+	if errors.As(err, &timeoutErr) {
+		if h.recordTimeout(modelID) {
+			log.Printf("[INFO] Model %s stream timed out, switching (attempt %d/%d)", modelID, attempt+1, maxRetries)
+			return true
+		}
+	}
+
+	if apiErr := h.tryParseAPIError(err); apiErr != nil {
+		if h.recordFailure(modelID, apiErr.Code) {
+			log.Printf("[INFO] Stream retrying with new model (attempt %d/%d)", attempt+1, maxRetries)
+			return true
+		}
+	}
+
+	return false
 }
 
 // getCurrentModelID gets the current model ID from model manager

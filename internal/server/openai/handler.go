@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -126,7 +127,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("chat completion failed after %d attempts: %v", maxRetries, lastErr))
 }
 
-// handleStream handles streaming chat completion requests
+// handleStream handles streaming chat completion requests with retry on failure
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *openrouter.ChatRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -134,40 +135,135 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *open
 		return
 	}
 
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		req.Model = h.getCurrentModelID()
+
+		// Create a cancellable context for this attempt
+		ctx, cancel := context.WithCancel(r.Context())
+		chunkChan, errChan := h.client.StreamChatCompletionWithContext(ctx, req)
+
+		// Wait for first chunk or error with a first-byte timeout
+		firstByteTimer := time.NewTimer(15 * time.Second)
+
+		select {
+		case chunk, ok := <-chunkChan:
+			firstByteTimer.Stop()
+			if !ok {
+				// Stream closed without data — check for error
+				cancel()
+				if err := <-errChan; err != nil {
+					if h.handleStreamRetry(req.Model, err, attempt, maxRetries) {
+						continue
+					}
+					h.writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				// Empty successful response
+				h.commitStreamHeaders(w, req.Model)
+				h.writeServerEvent(w, "done", nil)
+				flusher.Flush()
+				return
+			}
+
+			// Got first chunk — commit headers and forward the stream
+			h.commitStreamHeaders(w, req.Model)
+			h.writeServerEvent(w, "chunk", chunk)
+			flusher.Flush()
+			h.forwardStream(w, flusher, r, chunkChan, errChan, req.Model, cancel)
+			return
+
+		case err := <-errChan:
+			firstByteTimer.Stop()
+			cancel()
+			if err != nil {
+				if h.handleStreamRetry(req.Model, err, attempt, maxRetries) {
+					continue
+				}
+				h.writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			return
+
+		case <-firstByteTimer.C:
+			// First-byte timeout — treat as model timeout
+			cancel()
+			if h.recordTimeout(req.Model) {
+				log.Printf("[INFO] Model %s stream timed out, switching (attempt %d/%d)", req.Model, attempt+1, maxRetries)
+				continue
+			}
+			h.writeError(w, http.StatusGatewayTimeout, "stream timed out")
+			return
+
+		case <-r.Context().Done():
+			firstByteTimer.Stop()
+			cancel()
+			return
+		}
+	}
+
+	h.writeError(w, http.StatusBadGateway, fmt.Sprintf("streaming failed after %d attempts", maxRetries))
+}
+
+// commitStreamHeaders writes the SSE headers once we're committed to a stream
+func (h *Handler) commitStreamHeaders(w http.ResponseWriter, modelID string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("X-Model-Used", modelID)
+}
 
-	// Update model before starting stream
-	req.Model = h.getCurrentModelID()
-
-	chunkChan, errChan := h.client.StreamChatCompletion(req)
-
+// forwardStream forwards remaining chunks from an established stream to the client
+func (h *Handler) forwardStream(w http.ResponseWriter, flusher http.Flusher, r *http.Request, chunkChan <-chan openrouter.StreamChunk, errChan <-chan error, modelID string, cancel context.CancelFunc) {
+	defer cancel()
 	for {
 		select {
 		case chunk, ok := <-chunkChan:
 			if !ok {
+				// Stream ended — check for trailing error
+				select {
+				case err := <-errChan:
+					if err != nil {
+						if apiErr := h.tryParseAPIError(err); apiErr != nil {
+							h.recordFailure(modelID, apiErr.Code)
+						}
+						h.writeServerEvent(w, "error", map[string]string{"error": err.Error()})
+						flusher.Flush()
+						return
+					}
+				default:
+				}
 				h.writeServerEvent(w, "done", nil)
 				flusher.Flush()
 				return
 			}
 			h.writeServerEvent(w, "chunk", chunk)
 			flusher.Flush()
-		case err := <-errChan:
-			if err != nil {
-				// Try to parse as API error
-				if apiErr := h.tryParseAPIError(err); apiErr != nil {
-					h.recordFailure(req.Model, apiErr.Code)
-				}
-				h.writeServerEvent(w, "error", map[string]string{"error": err.Error()})
-				flusher.Flush()
-				return
-			}
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+// handleStreamRetry checks if a stream error is retryable and switches models if so
+func (h *Handler) handleStreamRetry(modelID string, err error, attempt, maxRetries int) bool {
+	var timeoutErr *openrouter.TimeoutError
+	if errors.As(err, &timeoutErr) {
+		if h.recordTimeout(modelID) {
+			log.Printf("[INFO] Model %s stream timed out, switching (attempt %d/%d)", modelID, attempt+1, maxRetries)
+			return true
+		}
+	}
+
+	if apiErr := h.tryParseAPIError(err); apiErr != nil {
+		if h.recordFailure(modelID, apiErr.Code) {
+			log.Printf("[INFO] Stream retrying with new model (attempt %d/%d)", attempt+1, maxRetries)
+			return true
+		}
+	}
+
+	return false
 }
 
 // getCurrentModelID gets the current model ID from model manager
