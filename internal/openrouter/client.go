@@ -18,7 +18,7 @@ const (
 	baseURL        = "https://openrouter.ai/api"
 	modelsEndpoint = "/v1/models"
 	chatEndpoint   = "/v1/chat/completions"
-	userAgent      = "frugalai/1.0"
+	userAgent      = "curl/8.7.1"
 )
 
 // HTTPError represents an HTTP error with status code
@@ -68,6 +68,18 @@ func NewClient(apiKey string, cacheTTL int) *Client {
 	}
 }
 
+func (c *Client) setCommonHeaders(req *http.Request) {
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	req.Header.Set("User-Agent", userAgent)
+}
+
+func (c *Client) setJSONHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	c.setCommonHeaders(req)
+}
+
 // GetModels fetches available models from OpenRouter
 func (c *Client) GetModels() ([]Model, error) {
 	// Check cache first
@@ -85,8 +97,7 @@ func (c *Client) GetModels() ([]Model, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("User-Agent", userAgent)
+	c.setCommonHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -167,10 +178,7 @@ func (c *Client) ChatCompletionWithTimeout(req *ChatRequest, timeout time.Durati
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	httpReq.Header.Set("User-Agent", userAgent)
-	httpReq.Header.Set("HTTP-Referer", "https://github.com/mosajjal/frugalai")
+	c.setJSONHeaders(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -231,10 +239,7 @@ func (c *Client) StreamChatCompletionWithContext(ctx context.Context, req *ChatR
 			return
 		}
 
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-		httpReq.Header.Set("User-Agent", userAgent)
-		httpReq.Header.Set("HTTP-Referer", "https://github.com/mosajjal/frugalai")
+		c.setJSONHeaders(httpReq)
 
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {

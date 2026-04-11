@@ -148,22 +148,21 @@ func runHeadless(c *cli.Context) error {
 
 	startTime = time.Now()
 
-	// Build config from CLI
-	cfg := &config.Config{
-		APIKey:                 c.String("api-key"),
-		Port:                   c.Int("port"),
-		MinParams:              c.Int("min-params"),
-		MinPopularity:          c.Int("min-popularity"),
-		EnableOpenAI:           c.Bool("enable-openai"),
-		EnableAnthropic:        c.Bool("enable-anthropic"),
-		OpenAIPath:             c.String("openai-path"),
-		AnthropicPath:          c.String("anthropic-path"),
-		LogLevel:               c.String("log-level"),
-		CacheTTL:               c.Int("cache-ttl"),
-		PreferredArchitectures: splitAndTrim(c.String("preferred-arch")),
-		ModelIndex:             c.Int("model-index"),
-		NumCandidates:          c.Int("num-candidates"),
-	}
+	// Start from environment-backed defaults so runtime ranking matches selector defaults.
+	cfg := config.LoadFromEnv()
+	cfg.APIKey = c.String("api-key")
+	cfg.Port = c.Int("port")
+	cfg.MinParams = c.Int("min-params")
+	cfg.MinPopularity = c.Int("min-popularity")
+	cfg.EnableOpenAI = c.Bool("enable-openai")
+	cfg.EnableAnthropic = c.Bool("enable-anthropic")
+	cfg.OpenAIPath = c.String("openai-path")
+	cfg.AnthropicPath = c.String("anthropic-path")
+	cfg.LogLevel = c.String("log-level")
+	cfg.CacheTTL = c.Int("cache-ttl")
+	cfg.PreferredArchitectures = splitAndTrim(c.String("preferred-arch"))
+	cfg.ModelIndex = c.Int("model-index")
+	cfg.NumCandidates = c.Int("num-candidates")
 
 	// Create OpenRouter client
 	client := openrouter.NewClient(cfg.APIKey, cfg.CacheTTL)
@@ -479,7 +478,7 @@ func RecordModelFailure(modelID string, statusCode int) bool {
 		// Find next candidate that isn't the current one
 		for i := 1; i < len(modelManager.Candidates); i++ {
 			nextIdx := (modelManager.CurrentIdx + i) % len(modelManager.Candidates)
-			nextModel := modelManager.Candidates[nextIdx]
+			nextModel := &modelManager.Candidates[nextIdx]
 
 			// Skip if this model also has recent failures
 			if modelManager.Failures[nextModel.ID] >= 3 {
@@ -489,7 +488,7 @@ func RecordModelFailure(modelID string, statusCode int) bool {
 			log.Printf("[INFO] Switching from %s to %s",
 				modelManager.Current.ID, nextModel.ID)
 
-			modelManager.Current = &nextModel
+			modelManager.Current = nextModel
 			modelManager.CurrentIdx = nextIdx
 			return true
 		}
@@ -524,7 +523,7 @@ func RecordModelTimeout(modelID string) bool {
 	if len(modelManager.Candidates) > 1 {
 		for i := 1; i < len(modelManager.Candidates); i++ {
 			nextIdx := (modelManager.CurrentIdx + i) % len(modelManager.Candidates)
-			nextModel := modelManager.Candidates[nextIdx]
+			nextModel := &modelManager.Candidates[nextIdx]
 
 			// Skip burned models
 			if modelManager.Burned[nextModel.ID] {
@@ -534,7 +533,7 @@ func RecordModelTimeout(modelID string) bool {
 			log.Printf("[INFO] Switching from %s to %s due to timeout",
 				modelManager.Current.ID, nextModel.ID)
 
-			modelManager.Current = &nextModel
+			modelManager.Current = nextModel
 			modelManager.CurrentIdx = nextIdx
 			return true
 		}

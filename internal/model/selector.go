@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,8 @@ type Selector struct {
 	mu     sync.RWMutex
 }
 
+const fallbackRouterID = "openrouter/free"
+
 // NewSelector creates a new model selector
 func NewSelector(client *openrouter.Client, cfg *config.Config) *Selector {
 	return &Selector{
@@ -29,30 +32,70 @@ func NewSelector(client *openrouter.Client, cfg *config.Config) *Selector {
 
 // SelectBest selects the best free model based on configuration
 func (s *Selector) SelectBest() (*openrouter.Model, error) {
-	models, err := s.client.GetFreeModels()
+	candidates, err := s.GetTopCandidates(1)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get free models: %w", err)
+		return nil, err
 	}
 
-	if len(models) == 0 {
-		return nil, fmt.Errorf("no free models available")
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no models available")
 	}
 
-	// Filter by constraints
-	filtered := s.filterModels(models)
+	return &candidates[0], nil
+}
+
+func (s *Selector) IsModelAvailable(id string) (bool, error) {
+	models, err := s.client.GetModels()
+	if err != nil {
+		return false, fmt.Errorf("failed to get models: %w", err)
+	}
+
+	_, found := findModelByID(models, id)
+	return found, nil
+}
+
+func (s *Selector) rankCandidates(models []openrouter.Model, n int) ([]openrouter.Model, error) {
+	freeModels := []openrouter.Model{}
+	for _, model := range models {
+		if isFreeModel(model) {
+			freeModels = append(freeModels, model)
+		}
+	}
+
+	filtered := s.filterModels(freeModels)
 	if len(filtered) == 0 {
-		return nil, fmt.Errorf("no models match the constraints")
+		return s.fallbackCandidates(models)
 	}
 
-	// Score models
 	scored := s.scoreModels(filtered)
-
-	// Sort by score (descending)
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].Score > scored[j].Score
 	})
 
-	return &scored[0].Model, nil
+	result := []openrouter.Model{}
+	for i := 0; i < n && i < len(scored); i++ {
+		result = append(result, scored[i].Model)
+	}
+
+	return s.appendFallbackRouter(result, models), nil
+}
+
+func (s *Selector) fallbackCandidates(models []openrouter.Model) ([]openrouter.Model, error) {
+	router, found := findModelByID(models, fallbackRouterID)
+	if !found {
+		return nil, fmt.Errorf("no free models available")
+	}
+
+	return []openrouter.Model{router}, nil
+}
+
+func (s *Selector) appendFallbackRouter(candidates, models []openrouter.Model) []openrouter.Model {
+	router, found := findModelByID(models, fallbackRouterID)
+	if !found || containsModel(candidates, router.ID) {
+		return candidates
+	}
+
+	return append(candidates, router)
 }
 
 // filterModels filters models based on configuration constraints
@@ -314,36 +357,37 @@ func (s *Selector) GetBestModelID() (string, error) {
 
 // GetTopCandidates returns the top N candidates, sorted by score
 func (s *Selector) GetTopCandidates(n int) ([]openrouter.Model, error) {
-	models, err := s.client.GetFreeModels()
+	models, err := s.client.GetModels()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get free models: %w", err)
+		return nil, fmt.Errorf("failed to get models: %w", err)
 	}
 
-	if len(models) == 0 {
-		return nil, fmt.Errorf("no free models available")
+	return s.rankCandidates(models, n)
+}
+
+func isFreeModel(model openrouter.Model) bool {
+	prompt, err1 := strconv.ParseFloat(model.Pricing.Prompt, 64)
+	completion, err2 := strconv.ParseFloat(model.Pricing.Completion, 64)
+	if err1 != nil || err2 != nil {
+		return false
 	}
 
-	// Filter by constraints
-	filtered := s.filterModels(models)
-	if len(filtered) == 0 {
-		return nil, fmt.Errorf("no models match the constraints")
+	return prompt == 0 && completion == 0
+}
+
+func findModelByID(models []openrouter.Model, id string) (openrouter.Model, bool) {
+	for _, model := range models {
+		if model.ID == id {
+			return model, true
+		}
 	}
 
-	// Score models
-	scored := s.scoreModels(filtered)
+	return openrouter.Model{}, false
+}
 
-	// Sort by score (descending)
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].Score > scored[j].Score
-	})
-
-	// Return top N
-	result := []openrouter.Model{}
-	for i := 0; i < n && i < len(scored); i++ {
-		result = append(result, scored[i].Model)
-	}
-
-	return result, nil
+func containsModel(models []openrouter.Model, id string) bool {
+	_, found := findModelByID(models, id)
+	return found
 }
 
 // GetCandidateByIndex gets a candidate by its index (0-based) from the top candidates

@@ -94,6 +94,10 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 		// Get current model - always replace with proxy model
 		modelID := h.getCurrentModelID()
+		if modelID == "" {
+			h.writeError(w, http.StatusServiceUnavailable, "no available model")
+			return
+		}
 		openaiReq.Model = modelID
 
 		resp, lastErr = h.client.ChatCompletion(openaiReq)
@@ -109,25 +113,9 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Check if it's a timeout error
-		var timeoutErr *openrouter.TimeoutError
-		if errors.As(lastErr, &timeoutErr) {
-			if h.recordTimeout(openaiReq.Model) {
-				log.Printf("[INFO] Model %s timed out, switching (attempt %d/%d)", openaiReq.Model, attempt+1, maxRetries)
-				continue
-			}
+		if h.recoverModel(openaiReq.Model, lastErr, attempt, maxRetries) {
+			continue
 		}
-
-		// Check if error is from API response
-		if apiErr := h.tryParseAPIError(lastErr); apiErr != nil {
-			// Record failure and try switching
-			if h.recordFailure(openaiReq.Model, apiErr.Code) {
-				log.Printf("[INFO] Retrying with new model (attempt %d/%d)", attempt+1, maxRetries)
-				continue
-			}
-		}
-
-		// For other errors, break
 		break
 	}
 
@@ -153,6 +141,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, anthropic
 	maxRetries := 3
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		openaiReq.Model = h.getCurrentModelID()
+		if openaiReq.Model == "" {
+			h.writeError(w, http.StatusServiceUnavailable, "no available model")
+			return
+		}
 
 		ctx, cancel := context.WithCancel(r.Context())
 		chunkChan, errChan := h.client.StreamChatCompletionWithContext(ctx, openaiReq)
@@ -265,34 +257,132 @@ func (h *Handler) forwardAnthropicStream(w http.ResponseWriter, flusher http.Flu
 
 // handleStreamRetry checks if a stream error is retryable and switches models if so
 func (h *Handler) handleStreamRetry(modelID string, err error, attempt, maxRetries int) bool {
-	var timeoutErr *openrouter.TimeoutError
-	if errors.As(err, &timeoutErr) {
-		if h.recordTimeout(modelID) {
-			log.Printf("[INFO] Model %s stream timed out, switching (attempt %d/%d)", modelID, attempt+1, maxRetries)
-			return true
-		}
-	}
-
-	if apiErr := h.tryParseAPIError(err); apiErr != nil {
-		if h.recordFailure(modelID, apiErr.Code) {
-			log.Printf("[INFO] Stream retrying with new model (attempt %d/%d)", attempt+1, maxRetries)
-			return true
-		}
-	}
-
-	return false
+	return h.recoverModel(modelID, err, attempt, maxRetries)
 }
 
 // getCurrentModelID gets the current model ID from model manager
 func (h *Handler) getCurrentModelID() string {
-	if h.modelManager != nil && h.modelManager.Current != nil {
-		return h.modelManager.Current.ID
+	if h.modelManager != nil {
+		h.mu.RLock()
+		current := h.modelManager.Current
+		h.mu.RUnlock()
+
+		if current != nil {
+			available, err := h.selector.IsModelAvailable(current.ID)
+			if err != nil {
+				log.Printf("[WARN] Could not verify model availability for %s: %v", current.ID, err)
+				return current.ID
+			}
+			if available {
+				return current.ID
+			}
+
+			log.Printf("[WARN] Current model %s is no longer in the live model list; refreshing candidates", current.ID)
+		}
+
+		if h.refreshCandidates() {
+			h.mu.RLock()
+			defer h.mu.RUnlock()
+			if h.modelManager.Current != nil {
+				return h.modelManager.Current.ID
+			}
+		}
 	}
-	// Fallback to selector
+
 	if id, err := h.selector.GetBestModelID(); err == nil {
 		return id
 	}
 	return ""
+}
+
+func (h *Handler) candidateCount() int {
+	if h.modelManager != nil && len(h.modelManager.Candidates) > 0 {
+		return len(h.modelManager.Candidates)
+	}
+	return 10
+}
+
+func (h *Handler) refreshCandidates() bool {
+	if h.modelManager == nil {
+		return false
+	}
+
+	candidates, err := h.selector.GetTopCandidates(h.candidateCount())
+	if err != nil {
+		log.Printf("[WARN] Failed to refresh model candidates: %v", err)
+		return false
+	}
+	if len(candidates) == 0 {
+		log.Printf("[WARN] Refresh returned no candidates")
+		return false
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	currentID := ""
+	if h.modelManager.Current != nil {
+		currentID = h.modelManager.Current.ID
+	}
+
+	currentIdx := 0
+	for i := range candidates {
+		if candidates[i].ID == currentID {
+			currentIdx = i
+			break
+		}
+	}
+
+	h.modelManager.Candidates = candidates
+	h.modelManager.Current = &h.modelManager.Candidates[currentIdx]
+	h.modelManager.CurrentIdx = currentIdx
+	h.modelManager.Failures = make(map[string]int)
+	h.modelManager.LastFailure = make(map[string]time.Time)
+	h.modelManager.Timeouts = make(map[string]int)
+	h.modelManager.Burned = make(map[string]bool)
+
+	log.Printf("[INFO] Refreshed %d live model candidates; current model: %s",
+		len(h.modelManager.Candidates), h.modelManager.Current.ID)
+
+	return true
+}
+
+func (h *Handler) recoverModel(modelID string, err error, attempt, maxRetries int) bool {
+	var timeoutErr *openrouter.TimeoutError
+	if errors.As(err, &timeoutErr) {
+		if h.recordTimeout(modelID) {
+			log.Printf("[INFO] Model %s timed out, switching (attempt %d/%d)", modelID, attempt+1, maxRetries)
+			return true
+		}
+		if h.refreshCandidates() {
+			log.Printf("[INFO] Refreshed live model list after timeout on %s (attempt %d/%d)", modelID, attempt+1, maxRetries)
+			return true
+		}
+		return false
+	}
+
+	apiErr := h.tryParseAPIError(err)
+	if apiErr == nil {
+		return false
+	}
+
+	if h.recordFailure(modelID, apiErr.Code) {
+		log.Printf("[INFO] Retrying with new model after upstream status %d (attempt %d/%d)", apiErr.Code, attempt+1, maxRetries)
+		return true
+	}
+
+	retryable := apiErr.Code == http.StatusBadRequest ||
+		apiErr.Code == http.StatusNotFound ||
+		apiErr.Code == http.StatusUnprocessableEntity ||
+		apiErr.Code == http.StatusTooManyRequests ||
+		apiErr.Code >= http.StatusInternalServerError
+
+	if retryable && h.refreshCandidates() {
+		log.Printf("[INFO] Refreshed live model list after upstream status %d (attempt %d/%d)", apiErr.Code, attempt+1, maxRetries)
+		return true
+	}
+
+	return false
 }
 
 // tryParseAPIError attempts to parse an error as an API error
@@ -501,7 +591,7 @@ func (h *Handler) recordTimeout(modelID string) bool {
 func (h *Handler) switchToNextModel() bool {
 	for i := 1; i < len(h.modelManager.Candidates); i++ {
 		nextIdx := (h.modelManager.CurrentIdx + i) % len(h.modelManager.Candidates)
-		nextModel := h.modelManager.Candidates[nextIdx]
+		nextModel := &h.modelManager.Candidates[nextIdx]
 
 		// Skip burned models
 		if h.modelManager.Burned[nextModel.ID] {
@@ -516,7 +606,7 @@ func (h *Handler) switchToNextModel() bool {
 		log.Printf("[INFO] Switching from %s to %s",
 			h.modelManager.Current.ID, nextModel.ID)
 
-		h.modelManager.Current = &nextModel
+		h.modelManager.Current = nextModel
 		h.modelManager.CurrentIdx = nextIdx
 		return true
 	}
