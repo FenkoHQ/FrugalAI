@@ -54,6 +54,29 @@ func (s *Selector) IsModelAvailable(id string) (bool, error) {
 	return found, nil
 }
 
+func (s *Selector) ProbeModel(id string) (*openrouter.ProbeResult, error) {
+	return s.client.ProbeModel(id)
+}
+
+func (s *Selector) SelectWorkingCandidate(candidates []openrouter.Model, preferredID string) (*openrouter.Model, int, *openrouter.ProbeResult, error) {
+	if len(candidates) == 0 {
+		return nil, -1, nil, fmt.Errorf("no candidates available")
+	}
+
+	order := candidateOrder(candidates, preferredID)
+	failures := []string{}
+
+	for _, idx := range order {
+		probe, err := s.client.ProbeModel(candidates[idx].ID)
+		if err == nil {
+			return &candidates[idx], idx, probe, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", candidates[idx].ID, err))
+	}
+
+	return nil, -1, nil, fmt.Errorf("no working model candidates: %s", strings.Join(failures, "; "))
+}
+
 func (s *Selector) rankCandidates(models []openrouter.Model, n int) ([]openrouter.Model, error) {
 	freeModels := []openrouter.Model{}
 	for _, model := range models {
@@ -388,6 +411,30 @@ func findModelByID(models []openrouter.Model, id string) (openrouter.Model, bool
 func containsModel(models []openrouter.Model, id string) bool {
 	_, found := findModelByID(models, id)
 	return found
+}
+
+func candidateOrder(candidates []openrouter.Model, preferredID string) []int {
+	order := make([]int, 0, len(candidates))
+	seen := map[int]bool{}
+
+	if preferredID != "" {
+		for i := range candidates {
+			if candidates[i].ID == preferredID {
+				order = append(order, i)
+				seen[i] = true
+				break
+			}
+		}
+	}
+
+	for i := range candidates {
+		if seen[i] {
+			continue
+		}
+		order = append(order, i)
+	}
+
+	return order
 }
 
 // GetCandidateByIndex gets a candidate by its index (0-based) from the top candidates

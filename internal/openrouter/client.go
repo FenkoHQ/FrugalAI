@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,6 +20,7 @@ const (
 	modelsEndpoint = "/v1/models"
 	chatEndpoint   = "/v1/chat/completions"
 	userAgent      = "curl/8.7.1"
+	probePrompt    = "ping"
 )
 
 // HTTPError represents an HTTP error with status code
@@ -160,6 +162,39 @@ func (c *Client) isFreeModel(model Model) bool {
 // ChatCompletion sends a chat completion request with timeout tracking
 func (c *Client) ChatCompletion(req *ChatRequest) (*ChatResponse, error) {
 	return c.ChatCompletionWithTimeout(req, 10*time.Second)
+}
+
+func (c *Client) ProbeModel(modelID string) (*ProbeResult, error) {
+	start := time.Now()
+	resp, err := c.ChatCompletionWithTimeout(&ChatRequest{
+		Model:       modelID,
+		Messages:    []ChatMessage{{Role: "user", Content: probePrompt}},
+		Temperature: 0,
+		MaxTokens:   8,
+	}, 12*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("empty probe response")
+	}
+
+	reply := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if !isHealthyProbeReply(reply) {
+		return nil, fmt.Errorf("unexpected probe reply: %q", reply)
+	}
+
+	return &ProbeResult{
+		ModelID:  modelID,
+		Prompt:   probePrompt,
+		Reply:    reply,
+		Duration: time.Since(start),
+	}, nil
+}
+
+func isHealthyProbeReply(reply string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(reply))
+	return normalized != "" && strings.Contains(normalized, "pong")
 }
 
 // ChatCompletionWithTimeout sends a chat completion request with custom timeout

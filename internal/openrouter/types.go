@@ -171,3 +171,11 @@ type HealthStatus struct {
 	Candidates int     `json:"candidates"`
 	Uptime     float64 `json:"uptime_seconds"`
 }
+
+// ProbeResult captures the outcome of a lightweight upstream model probe.
+type ProbeResult struct {
+	ModelID  string        `json:"model_id"`
+	Prompt   string        `json:"prompt"`
+	Reply    string        `json:"reply"`
+	Duration time.Duration `json:"-"`
+}

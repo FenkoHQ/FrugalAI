@@ -26,6 +26,8 @@ var (
 	modelManagerMu sync.RWMutex
 )
 
+const defaultProbeCandidateCount = 10
+
 func main() {
 	app := &cli.App{
 		Name:    "frugalai",
@@ -199,10 +201,16 @@ func runHeadless(c *cli.Context) error {
 	mux.HandleFunc("/model", modelInfoHandler)
 
 	// Model switch endpoint (for manual switching)
-	mux.HandleFunc("/model/switch", modelSwitchHandler)
+	mux.HandleFunc("/model/switch", modelSwitchHandler(selector))
+
+	// Force a live candidate refresh and probe-validated reselection.
+	mux.HandleFunc("/model/refresh", modelRefreshHandler(selector))
 
 	// Candidates endpoint
 	mux.HandleFunc("/candidates", candidatesHandler(selector))
+
+	// Lightweight upstream health probe for the current or requested model.
+	mux.HandleFunc("/probe", probeHandler(selector))
 
 	// Create server
 	server := &http.Server{
@@ -289,17 +297,36 @@ func initializeModelManager(selector *model.Selector, cfg *config.Config) {
 		log.Printf("[INFO] Using best model (index 0)")
 	}
 
-	selectedModel := candidates[selectedIdx]
+	preferredModelID := candidates[selectedIdx].ID
+	selectedModel, selectedIdx, probe, err := selector.SelectWorkingCandidate(candidates, preferredModelID)
+	if err != nil {
+		log.Printf("[WARN] Could not probe any candidate successfully: %v", err)
+		modelManager = &openrouter.ModelManager{
+			Candidates:  candidates,
+			Current:     nil,
+			CurrentIdx:  0,
+			Failures:    make(map[string]int),
+			LastFailure: make(map[string]time.Time),
+			Timeouts:    make(map[string]int),
+			Burned:      make(map[string]bool),
+		}
+		return
+	}
+
 	log.Printf("[INFO] Selected model: %s", selectedModel.Name)
 	log.Printf("[INFO]   ID: %s", selectedModel.ID)
 	log.Printf("[INFO]   Modality: %s", selectedModel.Architecture.Modality)
 	log.Printf("[INFO]   Tokenizer: %s", selectedModel.Architecture.Tokenizer)
 	log.Printf("[INFO]   Context Length: %d", selectedModel.ContextLength)
+	if selectedModel.ID != preferredModelID {
+		log.Printf("[WARN] Preferred candidate %s failed probe; promoted %s instead", preferredModelID, selectedModel.ID)
+	}
+	logProbeSuccess(probe)
 
 	// Create model manager
 	modelManager = &openrouter.ModelManager{
 		Candidates:  candidates,
-		Current:     &candidates[selectedIdx],
+		Current:     selectedModel,
 		CurrentIdx:  selectedIdx,
 		Failures:    make(map[string]int),
 		LastFailure: make(map[string]time.Time),
@@ -344,35 +371,121 @@ func modelInfoHandler(w http.ResponseWriter, r *http.Request) {
 		m.ID, m.Name, m.Architecture.Modality, m.Architecture.Tokenizer, m.ContextLength, m.Params, m.Popularity)
 }
 
-func modelSwitchHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+func modelSwitchHandler(selector *model.Selector) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		modelManagerMu.RLock()
+		if modelManager == nil || len(modelManager.Candidates) == 0 {
+			modelManagerMu.RUnlock()
+			http.Error(w, "No candidates available", http.StatusServiceUnavailable)
+			return
+		}
+		candidates := append([]openrouter.Model(nil), modelManager.Candidates...)
+		startIdx := (modelManager.CurrentIdx + 1) % len(candidates)
+		modelManagerMu.RUnlock()
+
+		rotated := rotateCandidates(candidates, startIdx)
+		selected, _, probe, err := selector.SelectWorkingCandidate(rotated, "")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		modelManagerMu.Lock()
+		defer modelManagerMu.Unlock()
+		selectedIdx := findCandidateIndexByID(modelManager.Candidates, selected.ID)
+		if selectedIdx < 0 {
+			http.Error(w, "Selected model is no longer available", http.StatusServiceUnavailable)
+			return
+		}
+		modelManager.Current = &modelManager.Candidates[selectedIdx]
+		modelManager.CurrentIdx = selectedIdx
+		log.Printf("[INFO] Switched to model: %s (index %d)", modelManager.Current.Name, selectedIdx)
+		logProbeSuccess(probe)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":      "switched",
+			"model_id":    modelManager.Current.ID,
+			"model_name":  modelManager.Current.Name,
+			"index":       selectedIdx,
+			"probe_reply": probe.Reply,
+			"latency_ms":  probe.Duration.Milliseconds(),
+		})
 	}
+}
 
-	modelManagerMu.Lock()
-	defer modelManagerMu.Unlock()
+func modelRefreshHandler(selector *model.Selector) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
-	// Try to switch to next available model
-	if len(modelManager.Candidates) == 0 {
-		http.Error(w, "No candidates available", http.StatusServiceUnavailable)
-		return
+		modelManagerMu.RLock()
+		preferredID := ""
+		if modelManager != nil && modelManager.Current != nil {
+			preferredID = modelManager.Current.ID
+		}
+		modelManagerMu.RUnlock()
+
+		selected, probe, err := refreshModelManager(selector, preferredID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":      "refreshed",
+			"model_id":    selected.ID,
+			"model_name":  selected.Name,
+			"probe_reply": probe.Reply,
+			"latency_ms":  probe.Duration.Milliseconds(),
+		})
 	}
+}
 
-	// Move to next candidate, wrapping around
-	nextIdx := (modelManager.CurrentIdx + 1) % len(modelManager.Candidates)
-	modelManager.Current = &modelManager.Candidates[nextIdx]
-	modelManager.CurrentIdx = nextIdx
+func probeHandler(selector *model.Selector) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
-	log.Printf("[INFO] Switched to model: %s (index %d)", modelManager.Current.Name, nextIdx)
+		modelID := r.URL.Query().Get("model")
+		if modelID == "" {
+			modelManagerMu.RLock()
+			if modelManager != nil && modelManager.Current != nil {
+				modelID = modelManager.Current.ID
+			}
+			modelManagerMu.RUnlock()
+		}
+		if modelID == "" {
+			http.Error(w, "No model selected", http.StatusServiceUnavailable)
+			return
+		}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":     "switched",
-		"model_id":   modelManager.Current.ID,
-		"model_name": modelManager.Current.Name,
-		"index":      nextIdx,
-	})
+		probe, err := selector.ProbeModel(modelID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		logProbeSuccess(probe)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":     "ok",
+			"model_id":   probe.ModelID,
+			"prompt":     probe.Prompt,
+			"reply":      probe.Reply,
+			"latency_ms": probe.Duration.Milliseconds(),
+		})
+	}
 }
 
 func candidatesHandler(selector *model.Selector) http.HandlerFunc {
@@ -422,6 +535,72 @@ func candidatesHandler(selector *model.Selector) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	}
+}
+
+func refreshModelManager(selector *model.Selector, preferredID string) (*openrouter.Model, *openrouter.ProbeResult, error) {
+	modelManagerMu.RLock()
+	candidateCount := defaultProbeCandidateCount
+	if modelManager != nil && len(modelManager.Candidates) > 0 {
+		candidateCount = len(modelManager.Candidates)
+	}
+	modelManagerMu.RUnlock()
+
+	candidates, err := selector.GetTopCandidates(candidateCount)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	selected, selectedIdx, probe, err := selector.SelectWorkingCandidate(candidates, preferredID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	modelManagerMu.Lock()
+	defer modelManagerMu.Unlock()
+
+	modelManager = &openrouter.ModelManager{
+		Candidates:  candidates,
+		Current:     selected,
+		CurrentIdx:  selectedIdx,
+		Failures:    make(map[string]int),
+		LastFailure: make(map[string]time.Time),
+		Timeouts:    make(map[string]int),
+		Burned:      make(map[string]bool),
+	}
+
+	log.Printf("[INFO] Refreshed candidates; selected working model %s", selected.ID)
+	logProbeSuccess(probe)
+	return selected, probe, nil
+}
+
+func findCandidateIndexByID(candidates []openrouter.Model, modelID string) int {
+	for i := range candidates {
+		if candidates[i].ID == modelID {
+			return i
+		}
+	}
+	return -1
+}
+
+func rotateCandidates(candidates []openrouter.Model, startIdx int) []openrouter.Model {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	rotated := make([]openrouter.Model, 0, len(candidates))
+	for i := 0; i < len(candidates); i++ {
+		idx := (startIdx + i) % len(candidates)
+		rotated = append(rotated, candidates[idx])
+	}
+	return rotated
+}
+
+func logProbeSuccess(probe *openrouter.ProbeResult) {
+	if probe == nil {
+		return
+	}
+	log.Printf("[INFO] Probe succeeded for %s in %dms with reply %q",
+		probe.ModelID, probe.Duration.Milliseconds(), probe.Reply)
 }
 
 // GetCurrentModelID returns the current model ID (thread-safe)

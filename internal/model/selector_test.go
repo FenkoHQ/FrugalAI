@@ -90,3 +90,19 @@ func TestRankCandidatesErrorsWithoutFreeFallback(t *testing.T) {
 		t.Fatal("expected an error when neither free models nor router fallback exist")
 	}
 }
+
+func TestCandidateOrderPrefersRequestedModelFirst(t *testing.T) {
+	candidates := []openrouter.Model{
+		{ID: "a"},
+		{ID: "b"},
+		{ID: "c"},
+	}
+
+	order := candidateOrder(candidates, "b")
+	want := []int{1, 0, 2}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("candidateOrder()[%d] = %d, want %d", i, order[i], want[i])
+		}
+	}
+}

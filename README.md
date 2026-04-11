@@ -94,6 +94,10 @@ POST http://localhost:8080/v1/messages
 ```
 GET http://localhost:8080/health     # Health check
 GET http://localhost:8080/model      # Current selected model info
+POST http://localhost:8080/model/switch   # Switch to the next probe-validated candidate
+POST http://localhost:8080/model/refresh  # Re-fetch candidates and re-pick a probe-validated model
+GET  http://localhost:8080/probe          # Send a live ping probe to the current model
+POST http://localhost:8080/probe          # Same as GET, optionally with ?model=<id>
 ```
 
 ## Client Examples

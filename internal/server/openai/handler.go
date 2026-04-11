@@ -304,24 +304,24 @@ func (h *Handler) refreshCandidates() bool {
 		return false
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	currentID := ""
+	h.mu.RLock()
 	if h.modelManager.Current != nil {
 		currentID = h.modelManager.Current.ID
 	}
+	h.mu.RUnlock()
 
-	currentIdx := 0
-	for i := range candidates {
-		if candidates[i].ID == currentID {
-			currentIdx = i
-			break
-		}
+	selected, currentIdx, probe, err := h.selector.SelectWorkingCandidate(candidates, currentID)
+	if err != nil {
+		log.Printf("[WARN] Candidate refresh probe failed: %v", err)
+		return false
 	}
 
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	h.modelManager.Candidates = candidates
-	h.modelManager.Current = &h.modelManager.Candidates[currentIdx]
+	h.modelManager.Current = selected
 	h.modelManager.CurrentIdx = currentIdx
 	h.modelManager.Failures = make(map[string]int)
 	h.modelManager.LastFailure = make(map[string]time.Time)
@@ -330,6 +330,8 @@ func (h *Handler) refreshCandidates() bool {
 
 	log.Printf("[INFO] Refreshed %d live model candidates; current model: %s",
 		len(h.modelManager.Candidates), h.modelManager.Current.ID)
+	log.Printf("[INFO] Probe succeeded for %s in %dms with reply %q",
+		probe.ModelID, probe.Duration.Milliseconds(), probe.Reply)
 
 	return true
 }
@@ -630,8 +632,16 @@ func (h *Handler) switchToNextModel() bool {
 			continue
 		}
 
+		probe, err := h.selector.ProbeModel(nextModel.ID)
+		if err != nil {
+			log.Printf("[WARN] Candidate %s failed probe during failover: %v", nextModel.ID, err)
+			continue
+		}
+
 		log.Printf("[INFO] Switching from %s to %s",
 			h.modelManager.Current.ID, nextModel.ID)
+		log.Printf("[INFO] Probe succeeded for %s in %dms with reply %q",
+			probe.ModelID, probe.Duration.Milliseconds(), probe.Reply)
 
 		h.modelManager.Current = nextModel
 		h.modelManager.CurrentIdx = nextIdx
