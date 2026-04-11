@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -179,10 +178,7 @@ func (c *Client) ProbeModel(modelID string) (*ProbeResult, error) {
 		return nil, fmt.Errorf("empty probe response")
 	}
 
-	reply := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if !isHealthyProbeReply(reply) {
-		return nil, fmt.Errorf("unexpected probe reply: %q", reply)
-	}
+	reply := resp.Choices[0].Message.Content
 
 	return &ProbeResult{
 		ModelID:  modelID,
@@ -190,11 +186,6 @@ func (c *Client) ProbeModel(modelID string) (*ProbeResult, error) {
 		Reply:    reply,
 		Duration: time.Since(start),
 	}, nil
-}
-
-func isHealthyProbeReply(reply string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(reply))
-	return normalized != "" && strings.Contains(normalized, "pong")
 }
 
 // ChatCompletionWithTimeout sends a chat completion request with custom timeout

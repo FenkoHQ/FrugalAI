@@ -43,26 +43,7 @@ func TestSetCommonHeadersSkipsEmptyAuthorization(t *testing.T) {
 	}
 }
 
-func TestIsHealthyProbeReply(t *testing.T) {
-	tests := []struct {
-		reply string
-		want  bool
-	}{
-		{reply: "pong", want: true},
-		{reply: "Pong!", want: true},
-		{reply: "\"pong\"", want: true},
-		{reply: "ping", want: false},
-		{reply: "", want: false},
-	}
-
-	for _, tc := range tests {
-		if got := isHealthyProbeReply(tc.reply); got != tc.want {
-			t.Fatalf("isHealthyProbeReply(%q) = %v, want %v", tc.reply, got, tc.want)
-		}
-	}
-}
-
-func TestProbeModelReturnsSuccessOnHealthyPong(t *testing.T) {
+func TestProbeModelReturnsSuccessOnAnyNonErrorReply(t *testing.T) {
 	client := NewClient("test-key", 300)
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -84,7 +65,7 @@ func TestProbeModelReturnsSuccessOnHealthyPong(t *testing.T) {
 				t.Fatalf("expected ping probe body, got %s", string(body))
 			}
 
-			return jsonResponse(http.StatusOK, `{"id":"1","object":"chat.completion","created":1,"model":"qwen/test:free","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), nil
+			return jsonResponse(http.StatusOK, `{"id":"1","object":"chat.completion","created":1,"model":"qwen/test:free","choices":[{"index":0,"message":{"role":"assistant","content":"hello there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), nil
 		}),
 	}
 
@@ -95,21 +76,21 @@ func TestProbeModelReturnsSuccessOnHealthyPong(t *testing.T) {
 	if probe.ModelID != "qwen/test:free" {
 		t.Fatalf("expected model id to round-trip, got %s", probe.ModelID)
 	}
-	if probe.Reply != "pong" {
-		t.Fatalf("expected pong reply, got %q", probe.Reply)
+	if probe.Reply != "hello there" {
+		t.Fatalf("expected assistant reply to round-trip, got %q", probe.Reply)
 	}
 }
 
-func TestProbeModelRejectsUnexpectedReply(t *testing.T) {
+func TestProbeModelRejectsEmptyChoices(t *testing.T) {
 	client := NewClient("test-key", 300)
 	client.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return jsonResponse(http.StatusOK, `{"id":"1","object":"chat.completion","created":1,"model":"qwen/test:free","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), nil
+			return jsonResponse(http.StatusOK, `{"id":"1","object":"chat.completion","created":1,"model":"qwen/test:free","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}}`), nil
 		}),
 	}
 
 	if _, err := client.ProbeModel("qwen/test:free"); err == nil {
-		t.Fatal("expected ProbeModel to fail on non-pong reply")
+		t.Fatal("expected ProbeModel to fail on empty choices")
 	}
 }
 
