@@ -91,6 +91,34 @@ func TestRankCandidatesErrorsWithoutFreeFallback(t *testing.T) {
 	}
 }
 
+func TestRankCandidatesPrefersLargerInferredParamModelWithoutTopWeeklyBias(t *testing.T) {
+	selector := &Selector{config: &config.Config{}}
+	models := []openrouter.Model{
+		{
+			ID:            "nvidia/nemotron-3-nano-30b-a3b:free",
+			Name:          "NVIDIA: Nemotron 3 Nano 30B A3B (free)",
+			Pricing:       openrouter.Pricing{Prompt: "0", Completion: "0"},
+			ContextLength: 256000,
+			Params:        30_000_000_000,
+		},
+		{
+			ID:            "nvidia/nemotron-3-super-120b-a12b:free",
+			Name:          "NVIDIA: Nemotron 3 Super (free)",
+			Pricing:       openrouter.Pricing{Prompt: "0", Completion: "0"},
+			ContextLength: 262144,
+			Params:        120_000_000_000,
+		},
+	}
+
+	candidates, err := selector.rankCandidates(models, 2)
+	if err != nil {
+		t.Fatalf("rankCandidates returned error: %v", err)
+	}
+	if candidates[0].ID != "nvidia/nemotron-3-super-120b-a12b:free" {
+		t.Fatalf("expected larger super model first, got %s", candidates[0].ID)
+	}
+}
+
 func TestCandidateOrderPrefersRequestedModelFirst(t *testing.T) {
 	candidates := []openrouter.Model{
 		{ID: "a"},

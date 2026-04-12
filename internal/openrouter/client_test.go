@@ -43,6 +43,53 @@ func TestSetCommonHeadersSkipsEmptyAuthorization(t *testing.T) {
 	}
 }
 
+func TestInferParamCount(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want int
+		ok   bool
+	}{
+		{name: "id 120b", text: "nvidia/nemotron-3-super-120b-a12b:free", want: 120_000_000_000, ok: true},
+		{name: "name 26b", text: "Google: Gemma 4 26B A4B (free)", want: 26_000_000_000, ok: true},
+		{name: "description 1.5t", text: "A 1.5T parameter model for testing", want: 1_500_000_000_000, ok: true},
+		{name: "no params", text: "model-without-size", want: 0, ok: false},
+	}
+
+	for _, tc := range tests {
+		got, ok := inferParamCount(tc.text)
+		if ok != tc.ok {
+			t.Fatalf("%s: inferParamCount(%q) ok=%v, want %v", tc.name, tc.text, ok, tc.ok)
+		}
+		if got != tc.want {
+			t.Fatalf("%s: inferParamCount(%q)=%d, want %d", tc.name, tc.text, got, tc.want)
+		}
+	}
+}
+
+func TestGetModelsInfersMissingParams(t *testing.T) {
+	client := NewClient("", 300)
+	client.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusOK, `{"data":[{"id":"nvidia/nemotron-3-super-120b-a12b:free","name":"NVIDIA: Nemotron 3 Super (free)","description":"NVIDIA Nemotron 3 Super is a 120B-parameter open hybrid MoE model.","pricing":{"prompt":"0","completion":"0"},"architecture":{"modality":"text->text","input_modalities":["text"],"output_modalities":["text"],"tokenizer":"Other"},"context_length":262144},{"id":"google/gemma-4-26b-a4b-it:free","name":"Google: Gemma 4 26B A4B (free)","pricing":{"prompt":"0","completion":"0"},"architecture":{"modality":"text->text","input_modalities":["text"],"output_modalities":["text"],"tokenizer":"Other"},"context_length":262144}]}`), nil
+		}),
+	}
+
+	models, err := client.GetModels()
+	if err != nil {
+		t.Fatalf("GetModels returned error: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	if models[0].Params != 120_000_000_000 {
+		t.Fatalf("expected super params to be inferred, got %d", models[0].Params)
+	}
+	if models[1].Params != 26_000_000_000 {
+		t.Fatalf("expected gemma params to be inferred, got %d", models[1].Params)
+	}
+}
+
 func TestProbeModelReturnsSuccessOnAnyNonErrorReply(t *testing.T) {
 	client := NewClient("test-key", 300)
 	client.httpClient = &http.Client{

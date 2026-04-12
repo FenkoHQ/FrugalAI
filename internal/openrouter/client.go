@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ const (
 	userAgent      = "curl/8.7.1"
 	probePrompt    = "ping"
 )
+
+var paramCountPattern = regexp.MustCompile("(?i)(?:^|[^a-z0-9])(\\d+(?:\\.\\d+)?)\\s*([bt])")
 
 // HTTPError represents an HTTP error with status code
 type HTTPError struct {
@@ -119,6 +122,8 @@ func (c *Client) GetModels() ([]Model, error) {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
+	modelsResp.Data = normalizeModels(modelsResp.Data)
+
 	// Update cache
 	c.cacheMutex.Lock()
 	c.cache = &CachedModels{
@@ -128,6 +133,51 @@ func (c *Client) GetModels() ([]Model, error) {
 	c.cacheMutex.Unlock()
 
 	return modelsResp.Data, nil
+}
+
+func normalizeModels(models []Model) []Model {
+	normalized := make([]Model, len(models))
+	for i, model := range models {
+		normalized[i] = normalizeModelMetadata(model)
+	}
+	return normalized
+}
+
+func normalizeModelMetadata(model Model) Model {
+	if model.Params <= 0 {
+		if inferred, ok := inferParamsFromModel(model); ok {
+			model.Params = inferred
+		}
+	}
+	return model
+}
+
+func inferParamsFromModel(model Model) (int, bool) {
+	for _, text := range []string{model.ID, model.Name, model.Description} {
+		if inferred, ok := inferParamCount(text); ok {
+			return inferred, true
+		}
+	}
+	return 0, false
+}
+
+func inferParamCount(text string) (int, bool) {
+	matches := paramCountPattern.FindStringSubmatch(text)
+	if len(matches) != 3 {
+		return 0, false
+	}
+
+	value, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, false
+	}
+
+	multiplier := 1_000_000_000.0
+	if matches[2] == "t" || matches[2] == "T" {
+		multiplier = 1_000_000_000_000.0
+	}
+
+	return int(value * multiplier), true
 }
 
 // GetFreeModels returns only free models
