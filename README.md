@@ -161,20 +161,25 @@ curl http://localhost:8080/v1/messages \
 
 ## Model Selection Algorithm
 
-The proxy scores models based on several factors:
+FrugalAI ranks free models first, then probes them live before promotion. A higher score improves ordering, but the final winner is the first ranked candidate whose upstream probe returns a normal non-error completion.
 
-1. **Popularity** (30% weight): Logarithmic scale based on usage
-2. **Parameters** (40% weight): Larger models get higher scores
-3. **Context Length** (20% weight): Longer context is preferred
-4. **Architecture Bonus** (10%): Bonus for preferred architectures
-5. **Quality Bonus**: Additional bonus for known high-quality model families
+Ranking inputs:
 
-Quality bonuses are applied for:
-- Claude/Anthropic models: +0.15
-- GPT/OpenAI models: +0.12
-- Gemini/Google models: +0.10
-- Mistral/Mixtral: +0.08
-- Llama/Meta: +0.08
+1. Popularity: 30% weight, normalized logarithmically
+2. Parameters: 40% weight, normalized with 70B and above saturating at max score
+3. Context Length: 20% weight, normalized with 200k and above saturating at max score
+4. Preferred Architecture Bonus: +0.1 for configured architecture matches
+5. Top Weekly Bonus: +0.5 for exact matches in the curated top weekly list
+6. Quality Family Bonus: family-based bonuses such as Anthropic +0.15, OpenAI +0.12, Google +0.10, NVIDIA Nemotron +0.07, Qwen +0.07
+7. Stealth Launch Bonus: +0.4 for recently published free models from known providers
+
+Normalization and fallback behavior:
+
+- Only free models are ranked
+- Meta-routers such as openrouter/free are skipped during normal ranking and appended as a last-resort fallback
+- When OpenRouter omits params, FrugalAI infers them from the model ID, name, or description, for example 30B, 120B, or 1.5T
+- Missing popularity or params fall back to neutral mid-range normalization values instead of zeroing the score
+- tiny, mini, nano, and micro names receive a small penalty
 
 ## Getting an OpenRouter API Key
 
