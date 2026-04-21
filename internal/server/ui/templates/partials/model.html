@@ -1,0 +1,42 @@
+{{define "model.html"}}<div id="model-section"
+     hx-get="/admin/ui/partials/model"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML">
+
+  <div class="section-head">
+    <span class="section-title">Active model</span>
+  </div>
+
+  {{if .Current}}
+  <div class="model-card" style="margin-bottom:16px">
+    <div class="model-id">{{.Current.ID}}</div>
+    <div style="color:var(--muted);font-size:12px;margin-bottom:6px">{{.Current.Name}}</div>
+    <div class="model-meta">
+      {{if .Current.ContextLength}}<span class="tag">ctx {{.Current.ContextLength}}</span>{{end}}
+      {{if .Current.Params}}<span class="tag">{{.Current.Params}}B</span>{{end}}
+      {{if .Current.Architecture.Tokenizer}}<span class="tag">{{.Current.Architecture.Tokenizer}}</span>{{end}}
+    </div>
+  </div>
+  {{else}}
+  <div class="model-card" style="margin-bottom:16px;color:var(--muted)">No model selected</div>
+  {{end}}
+
+  <div class="section-head">
+    <span class="section-title">Candidates</span>
+  </div>
+
+  {{range $i, $m := .Candidates}}
+  <div class="candidate{{if eq $i $.CurrentIdx}} active{{end}}">
+    <span class="candidate-name" title="{{$m.ID}}">{{$m.Name}}</span>
+    {{if eq $i $.CurrentIdx}}
+    <span class="dot-active"></span>
+    {{else}}
+    <button class="btn btn-sm"
+            hx-post="/admin/ui/model/force?id={{$m.ID}}"
+            hx-target="#model-section"
+            hx-swap="outerHTML">use</button>
+    {{end}}
+  </div>
+  {{end}}
+
+</div>{{end}}

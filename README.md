@@ -2,6 +2,8 @@
 
 An intelligent LLM proxy that automatically routes requests to the best free model available on OpenRouter. Provides both OpenAI and Anthropic compatible API endpoints.
 
+![FrugalAI UI](docs/screenshot.png)
+
 ## Features
 
 - **Automatic Model Selection**: Intelligently selects the best free model based on:
@@ -56,6 +58,8 @@ frugalai -api-key "your-openrouter-api-key"
 | `-log-level` | `FRUGALAI_LOG_LEVEL` | `info` | Log level |
 | `-cache-ttl` | `FRUGALAI_CACHE_TTL` | `300` | Model cache TTL (seconds) |
 | `-preferred-arch` | `FRUGALAI_PREFERRED_ARCH` | - | Preferred architectures (comma-separated) |
+| `-ui-basic-auth` | `FRUGALAI_UI_BASIC_AUTH` | - | Basic auth for `/admin/*` routes (`user:pass`) |
+| `-proxy-api-key` | `FRUGALAI_PROXY_API_KEY` | - | Require this key on inference routes (`Authorization: Bearer` or `x-api-key`) |
 
 ### Example Configurations
 
@@ -89,15 +93,47 @@ GET  http://localhost:8080/v1/models
 POST http://localhost:8080/v1/messages
 ```
 
-### Utility Endpoints
+### Admin Endpoints
+
+All admin routes live under `/admin/` and are optionally protected by `--ui-basic-auth`. `/health` is also available at root without auth for container and load-balancer probes.
 
 ```
-GET http://localhost:8080/health     # Health check
-GET http://localhost:8080/model      # Current selected model info
-POST http://localhost:8080/model/switch   # Switch to the next probe-validated candidate
-POST http://localhost:8080/model/refresh  # Re-fetch candidates and re-pick a probe-validated model
-GET  http://localhost:8080/probe          # Send a live ping probe to the current model
-POST http://localhost:8080/probe          # Same as GET, optionally with ?model=<id>
+GET  http://localhost:8080/health                  # Health check — no auth, always accessible
+GET  http://localhost:8080/admin/health            # Same, under /admin/
+GET  http://localhost:8080/admin/model             # Current selected model info
+POST http://localhost:8080/admin/model/switch      # Switch to the next probe-validated candidate
+POST http://localhost:8080/admin/model/refresh     # Re-fetch candidates and re-pick a probe-validated model
+GET  http://localhost:8080/admin/candidates        # List all ranked candidates
+GET  http://localhost:8080/admin/probe             # Live probe of current model
+POST http://localhost:8080/admin/probe?model=<id>  # Live probe of a specific model
+GET  http://localhost:8080/admin/ui/               # Web dashboard
+GET  http://localhost:8080/admin/metrics           # Prometheus metrics
+```
+
+### Prometheus Metrics
+
+`GET /metrics` returns Prometheus text-format (0.0.4) counters and gauges:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `frugalai_requests_total` | counter | Total completed requests |
+| `frugalai_tokens_in_total` | counter | Total prompt tokens consumed |
+| `frugalai_tokens_out_total` | counter | Total completion tokens generated |
+| `frugalai_failures_total` | counter | Total failed requests |
+| `frugalai_uptime_seconds` | gauge | Seconds since process start |
+| `frugalai_model_requests_total{model="…"}` | counter | Requests per upstream model |
+| `frugalai_model_tokens_in_total{model="…"}` | counter | Prompt tokens per upstream model |
+| `frugalai_model_tokens_out_total{model="…"}` | counter | Completion tokens per upstream model |
+| `frugalai_model_failures_total{model="…"}` | counter | Failures per upstream model |
+
+Example Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: frugalai
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: /admin/metrics
 ```
 
 ## Client Examples

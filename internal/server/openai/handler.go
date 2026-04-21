@@ -14,6 +14,7 @@ import (
 
 	"github.com/mosajjal/frugalai/internal/model"
 	"github.com/mosajjal/frugalai/internal/openrouter"
+	"github.com/mosajjal/frugalai/internal/store"
 )
 
 // Handler handles OpenAI-compatible API requests
@@ -21,6 +22,7 @@ type Handler struct {
 	selector     *model.Selector
 	client       *openrouter.Client
 	modelManager *openrouter.ModelManager
+	store        *store.Store
 	mu           sync.RWMutex
 }
 
@@ -33,18 +35,25 @@ func NewHandler(selector *model.Selector, client *openrouter.Client) *Handler {
 }
 
 // NewHandlerWithManager creates a new OpenAI-compatible handler with model manager
-func NewHandlerWithManager(selector *model.Selector, client *openrouter.Client, mgr *openrouter.ModelManager) *Handler {
+func NewHandlerWithManager(selector *model.Selector, client *openrouter.Client, mgr *openrouter.ModelManager, s *store.Store) *Handler {
 	return &Handler{
 		selector:     selector,
 		client:       client,
 		modelManager: mgr,
+		store:        s,
 	}
 }
 
 // RegisterRoutes registers the OpenAI-compatible routes
-func (h *Handler) RegisterRoutes(mux *http.ServeMux, path string) {
-	mux.HandleFunc(path+"/chat/completions", h.handleChatCompletions)
-	mux.HandleFunc(path+"/models", h.handleModels)
+func (h *Handler) RegisterRoutes(mux *http.ServeMux, path string, mw func(http.Handler) http.Handler) {
+	w := func(hf http.HandlerFunc) http.Handler {
+		if mw != nil {
+			return mw(hf)
+		}
+		return hf
+	}
+	mux.Handle(path+"/chat/completions", w(h.handleChatCompletions))
+	mux.Handle(path+"/models", w(h.handleModels))
 }
 
 // handleChatCompletions handles chat completion requests with error handling and retry
@@ -100,7 +109,9 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		resp, lastErr = h.client.ChatCompletion(&req)
 
 		if lastErr == nil {
-			// Success - write response
+			if h.store != nil {
+				h.store.RecordRequest(req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Model-Used", req.Model)
 			if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -116,6 +127,9 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// All retries exhausted
+	if h.store != nil {
+		h.store.RecordFailure(modelID)
+	}
 	h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("chat completion failed after %d attempts: %v", maxRetries, lastErr))
 }
 

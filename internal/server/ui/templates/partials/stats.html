@@ -1,0 +1,29 @@
+{{define "stats.html"}}<div class="stats-bar"
+     hx-get="/admin/ui/partials/stats"
+     hx-trigger="every 10s"
+     hx-swap="outerHTML">
+  <div class="stat-cell">
+    <span class="stat-label">Uptime</span>
+    <span class="stat-value">{{.Uptime}}</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-label">Requests</span>
+    <span class="stat-value accent">{{.TotalRequests}}</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-label">Tokens in</span>
+    <span class="stat-value">{{.TotalTokensIn}}</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-label">Tokens out</span>
+    <span class="stat-value">{{.TotalTokensOut}}</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-label">Failures</span>
+    <span class="stat-value" style="{{if gt .TotalFailures 0}}color:var(--err){{end}}">{{.TotalFailures}}</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-label">Active model</span>
+    <span class="stat-value" style="font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--accent)">{{if .CurrentModel}}{{.CurrentModel}}{{else}}—{{end}}</span>
+  </div>
+</div>{{end}}

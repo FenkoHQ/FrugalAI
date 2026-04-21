@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,6 +19,8 @@ import (
 	"github.com/mosajjal/frugalai/internal/openrouter"
 	"github.com/mosajjal/frugalai/internal/server/anthropic"
 	"github.com/mosajjal/frugalai/internal/server/openai"
+	"github.com/mosajjal/frugalai/internal/server/ui"
+	"github.com/mosajjal/frugalai/internal/store"
 	"github.com/urfave/cli/v2"
 )
 
@@ -110,6 +114,16 @@ func main() {
 				Value:   10,
 				EnvVars: []string{"FRUGALAI_NUM_CANDIDATES"},
 			},
+			&cli.StringFlag{
+				Name:    "ui-basic-auth",
+				Usage:   "Protect UI and metrics with HTTP basic auth (format: user:pass)",
+				EnvVars: []string{"FRUGALAI_UI_BASIC_AUTH"},
+			},
+			&cli.StringFlag{
+				Name:    "proxy-api-key",
+				Usage:   "Require this API key on inference endpoints (OpenAI-style Bearer token or x-api-key header)",
+				EnvVars: []string{"FRUGALAI_PROXY_API_KEY"},
+			},
 		},
 		Action: run,
 	}
@@ -119,10 +133,12 @@ func main() {
 	}
 }
 
+var logStore = store.New(store.DefaultSize)
+
 func setupLogging(c *cli.Context) error {
 	level := c.String("log-level")
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetOutput(os.Stdout)
+	log.SetOutput(io.MultiWriter(os.Stdout, logStore))
 
 	switch level {
 	case "debug":
@@ -176,46 +192,89 @@ func runHeadless(c *cli.Context) error {
 	initializeModelManager(selector, cfg)
 
 	// Create handlers with model manager
-	openaiHandler := openai.NewHandlerWithManager(selector, client, modelManager)
-	anthropicHandler := anthropic.NewHandlerWithManager(selector, client, modelManager)
+	openaiHandler := openai.NewHandlerWithManager(selector, client, modelManager, logStore)
+	anthropicHandler := anthropic.NewHandlerWithManager(selector, client, modelManager, logStore)
 
 	// Setup HTTP server
 	mux := http.NewServeMux()
 
-	// Register OpenAI-compatible routes
-	if cfg.EnableOpenAI {
-		openaiHandler.RegisterRoutes(mux, cfg.OpenAIPath)
-		log.Printf("[INFO] OpenAI-compatible API enabled at: http://localhost:%d%s", cfg.Port, cfg.OpenAIPath)
+	// ── Inference routes (optional proxy API key) ──────────────────────────
+	var inferenceMW func(http.Handler) http.Handler
+	if key := c.String("proxy-api-key"); key != "" {
+		inferenceMW = proxyAPIKeyMiddleware(key)
+		log.Printf("[INFO] Proxy API key authentication enabled on inference routes")
 	}
 
-	// Register Anthropic-compatible routes
+	if cfg.EnableOpenAI {
+		openaiHandler.RegisterRoutes(mux, cfg.OpenAIPath, inferenceMW)
+		log.Printf("[INFO] OpenAI-compatible API enabled at: http://localhost:%d%s", cfg.Port, cfg.OpenAIPath)
+	}
 	if cfg.EnableAnthropic {
-		anthropicHandler.RegisterRoutes(mux, cfg.AnthropicPath)
+		anthropicHandler.RegisterRoutes(mux, cfg.AnthropicPath, inferenceMW)
 		log.Printf("[INFO] Anthropic-compatible API enabled at: http://localhost:%d%s", cfg.Port, cfg.AnthropicPath)
 	}
 
-	// Health check endpoint with model info
+	// ── Admin routes under /admin/ (optional basic auth) ───────────────────
+	var adminMW func(http.Handler) http.Handler
+	if creds := c.String("ui-basic-auth"); creds != "" {
+		adminMW = basicAuthMiddleware(creds)
+		if adminMW != nil {
+			log.Printf("[INFO] Basic auth enabled on /admin/ routes")
+		}
+	}
+
+	adminRoute := func(pattern string, handler http.HandlerFunc) {
+		if adminMW != nil {
+			mux.Handle(pattern, adminMW(handler))
+		} else {
+			mux.HandleFunc(pattern, handler)
+		}
+	}
+
+	// /health at root — no auth, compatible with load balancers and container probes
 	mux.HandleFunc("/health", healthHandler)
 
-	// Model info endpoint
-	mux.HandleFunc("/model", modelInfoHandler)
+	adminRoute("/admin/health", healthHandler)
+	adminRoute("/admin/model", modelInfoHandler)
+	adminRoute("/admin/model/switch", modelSwitchHandler(selector))
+	adminRoute("/admin/model/refresh", modelRefreshHandler(selector))
+	adminRoute("/admin/candidates", candidatesHandler(selector))
+	adminRoute("/admin/probe", probeHandler(selector))
+	adminRoute("/admin/metrics", metricsHandler(logStore))
 
-	// Model switch endpoint (for manual switching)
-	mux.HandleFunc("/model/switch", modelSwitchHandler(selector))
+	uiHandler := ui.NewHandler(
+		logStore,
+		func() *openrouter.ModelManager {
+			modelManagerMu.RLock()
+			defer modelManagerMu.RUnlock()
+			return modelManager
+		},
+		func(id string) bool {
+			modelManagerMu.Lock()
+			defer modelManagerMu.Unlock()
+			if modelManager == nil {
+				return false
+			}
+			for i := range modelManager.Candidates {
+				if modelManager.Candidates[i].ID == id {
+					modelManager.Current = &modelManager.Candidates[i]
+					modelManager.CurrentIdx = i
+					log.Printf("[INFO] Forced model: %s", id)
+					return true
+				}
+			}
+			return false
+		},
+		startTime,
+	)
+	uiHandler.RegisterRoutes(mux, adminMW)
 
-	// Force a live candidate refresh and probe-validated reselection.
-	mux.HandleFunc("/model/refresh", modelRefreshHandler(selector))
-
-	// Candidates endpoint
-	mux.HandleFunc("/candidates", candidatesHandler(selector))
-
-	// Lightweight upstream health probe for the current or requested model.
-	mux.HandleFunc("/probe", probeHandler(selector))
+	wrappedMux := http.Handler(mux)
 
 	// Create server
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      mux,
+		Handler:      wrappedMux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -732,6 +791,93 @@ func GetCandidates() []openrouter.Model {
 		return []openrouter.Model{}
 	}
 	return modelManager.Candidates
+}
+
+func proxyAPIKeyMiddleware(key string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			xkey := r.Header.Get("x-api-key")
+			if bearer != key && xkey != key {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				fmt.Fprintf(w, `{"error":{"message":"Invalid API key","type":"authentication_error","code":"invalid_api_key"}}`)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func basicAuthMiddleware(creds string) func(http.Handler) http.Handler {
+	parts := strings.SplitN(creds, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		log.Printf("[WARN] --ui-basic-auth: expected non-empty user:pass, auth disabled")
+		return nil
+	}
+	user, pass := parts[0], parts[1]
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, p, ok := r.BasicAuth()
+			if !ok || u != user || p != pass {
+				w.Header().Set("WWW-Authenticate", `Basic realm="FrugalAI"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func metricsHandler(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		snap := s.Snapshot()
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+		fmt.Fprintf(w, "# HELP frugalai_requests_total Total completed requests\n")
+		fmt.Fprintf(w, "# TYPE frugalai_requests_total counter\n")
+		fmt.Fprintf(w, "frugalai_requests_total %d\n\n", snap.TotalRequests)
+
+		fmt.Fprintf(w, "# HELP frugalai_tokens_in_total Total prompt tokens consumed\n")
+		fmt.Fprintf(w, "# TYPE frugalai_tokens_in_total counter\n")
+		fmt.Fprintf(w, "frugalai_tokens_in_total %d\n\n", snap.TotalTokensIn)
+
+		fmt.Fprintf(w, "# HELP frugalai_tokens_out_total Total completion tokens generated\n")
+		fmt.Fprintf(w, "# TYPE frugalai_tokens_out_total counter\n")
+		fmt.Fprintf(w, "frugalai_tokens_out_total %d\n\n", snap.TotalTokensOut)
+
+		fmt.Fprintf(w, "# HELP frugalai_failures_total Total failed requests\n")
+		fmt.Fprintf(w, "# TYPE frugalai_failures_total counter\n")
+		fmt.Fprintf(w, "frugalai_failures_total %d\n\n", snap.TotalFailures)
+
+		fmt.Fprintf(w, "# HELP frugalai_uptime_seconds Seconds since start\n")
+		fmt.Fprintf(w, "# TYPE frugalai_uptime_seconds gauge\n")
+		fmt.Fprintf(w, "frugalai_uptime_seconds %.0f\n\n", time.Since(startTime).Seconds())
+
+		fmt.Fprintf(w, "# HELP frugalai_model_requests_total Requests per model\n")
+		fmt.Fprintf(w, "# TYPE frugalai_model_requests_total counter\n")
+		for model, ms := range snap.Models {
+			fmt.Fprintf(w, "frugalai_model_requests_total{model=%q} %d\n", model, ms.Requests)
+		}
+
+		fmt.Fprintf(w, "\n# HELP frugalai_model_tokens_in_total Prompt tokens per model\n")
+		fmt.Fprintf(w, "# TYPE frugalai_model_tokens_in_total counter\n")
+		for model, ms := range snap.Models {
+			fmt.Fprintf(w, "frugalai_model_tokens_in_total{model=%q} %d\n", model, ms.TokensIn)
+		}
+
+		fmt.Fprintf(w, "\n# HELP frugalai_model_tokens_out_total Completion tokens per model\n")
+		fmt.Fprintf(w, "# TYPE frugalai_model_tokens_out_total counter\n")
+		for model, ms := range snap.Models {
+			fmt.Fprintf(w, "frugalai_model_tokens_out_total{model=%q} %d\n", model, ms.TokensOut)
+		}
+
+		fmt.Fprintf(w, "\n# HELP frugalai_model_failures_total Failures per model\n")
+		fmt.Fprintf(w, "# TYPE frugalai_model_failures_total counter\n")
+		for model, ms := range snap.Models {
+			fmt.Fprintf(w, "frugalai_model_failures_total{model=%q} %d\n", model, ms.Failures)
+		}
+	}
 }
 
 func splitAndTrim(s string) []string {

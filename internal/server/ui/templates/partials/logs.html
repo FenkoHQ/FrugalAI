@@ -1,0 +1,11 @@
+{{define "logs.html"}}{{if .Entries}}{{range .Entries}}<div class="log-entry">
+  <span class="log-time">{{.Time.Format "15:04:05.000"}}</span>
+  <span class="log-level {{.Level}}">{{.Level}}</span>
+  <span class="log-msg">{{.Message}}</span>
+</div>{{end}}{{if .HasMore}}<div class="load-more">
+  <button class="btn btn-sm"
+          hx-get="/admin/ui/partials/logs?offset={{.NextOffset}}"
+          hx-target="#log-entries"
+          hx-swap="beforeend"
+          hx-on::after-request="this.closest('.load-more').remove()">Load older</button>
+</div>{{end}}{{else}}<div class="empty-state">No log entries yet.</div>{{end}}{{end}}
