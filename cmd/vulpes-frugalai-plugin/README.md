@@ -17,10 +17,10 @@ It keeps FrugalAI's core behavior:
 go build -o bin/vulpes-frugalai-plugin ./cmd/vulpes-frugalai-plugin
 ```
 
-The module currently uses the sibling Vulpes SDK checkout:
+The plugin imports the public Vulpes SDK module directly:
 
 ```text
-replace github.com/FenkoHQ/vulpes-core-plugins/sdk => ../vulpes-core-plugins/sdk
+github.com/FenkoHQ/vulpes-core-plugins/sdk
 ```
 
 ## Vulpes config example
