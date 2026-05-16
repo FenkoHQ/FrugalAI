@@ -1,0 +1,42 @@
+api_version: gateway.fenko.dev/v1
+kind: GatewayPlugin
+name: frugalai-upstream
+version: 0.1.0
+entrypoint: vulpes-frugalai-plugin
+capabilities:
+  - upstream_provider
+config_schema:
+  type: object
+  required: [api_key]
+  properties:
+    api_key: {type: string, secret: true}
+    base_url: {type: string, default: "https://openrouter.ai/api/v1"}
+    min_params: {type: integer, minimum: 0}
+    min_popularity: {type: integer, minimum: 0}
+    preferred_architectures:
+      oneOf:
+        - type: array
+          items: {type: string}
+        - type: string
+    top_weekly_models:
+      oneOf:
+        - type: array
+          items: {type: string}
+        - type: string
+    model_index: {type: integer, default: -1}
+    num_candidates: {type: integer, default: 10}
+    cache_ttl_seconds: {type: integer, default: 300}
+    probe_on_start: {type: boolean, default: true}
+    max_retries: {type: integer, default: 3}
+    timeout_seconds: {type: integer, default: 120}
+permissions:
+  network:
+    outbound:
+      - openrouter.ai:443
+  data:
+    read_prompt: true
+    read_response: true
+  secrets:
+    read:
+      - OPENROUTER_API_KEY
+      - FRUGALAI_API_KEY

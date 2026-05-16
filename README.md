@@ -16,6 +16,16 @@ An intelligent LLM proxy that automatically routes requests to the best free mod
 - **Configurable Constraints**: Set minimum parameter counts and popularity thresholds
 - **Streaming Support**: Full support for streaming responses
 
+## Vulpes Plugin
+
+FrugalAI can also run as a Vulpes `upstream_provider` plugin from this repository:
+
+```bash
+go build -o bin/vulpes-frugalai-plugin ./cmd/vulpes-frugalai-plugin
+```
+
+See [`cmd/vulpes-frugalai-plugin/README.md`](cmd/vulpes-frugalai-plugin/README.md) for Vulpes config.
+
 ## Installation
 
 ```bash
