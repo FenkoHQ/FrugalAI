@@ -38,22 +38,29 @@ func TestIsConcreteModel(t *testing.T) {
 }
 
 func TestResponseChunksUseActualProviderModel(t *testing.T) {
-	out := openAIChatResponse{ID: "chatcmpl_1", Created: 123, Model: "qwen/free"}
-	out.Choices = append(out.Choices, struct {
+	decoded := openAIChatResponse{ID: "chatcmpl_1", Created: 123, Model: "qwen/free"}
+	decoded.Choices = append(decoded.Choices, struct {
 		Index   int `json:"index"`
 		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role      string           `json:"role"`
+			Content   string           `json:"content"`
+			ToolCalls []openAIToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	}{Index: 0, FinishReason: "stop"})
-	out.Choices[0].Message.Role = "assistant"
-	out.Choices[0].Message.Content = "ok"
-	out.Usage.PromptTokens = 2
-	out.Usage.CompletionTokens = 3
-	out.Usage.TotalTokens = 5
+	decoded.Choices[0].Message.Role = "assistant"
+	decoded.Choices[0].Message.Content = "ok"
+	decoded.Usage.PromptTokens = 2
+	decoded.Usage.CompletionTokens = 3
+	decoded.Usage.TotalTokens = 5
 
-	chunks := responseChunks(sdk.InvokeRequest{}, "qwen/free", out)
+	out := make(chan sdk.ResponseChunk, 8)
+	responseChunks(sdk.InvokeRequest{}, "qwen/free", decoded, out)
+	close(out)
+	var chunks []sdk.ResponseChunk
+	for c := range out {
+		chunks = append(chunks, c)
+	}
 	if len(chunks) != 2 {
 		t.Fatalf("len = %d, want 2", len(chunks))
 	}

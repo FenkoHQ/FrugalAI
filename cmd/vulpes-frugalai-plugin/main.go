@@ -93,21 +93,28 @@ func (p *plugin) Configure(ctx context.Context, cfg map[string]any, secrets map[
 	return nil
 }
 
-func (p *plugin) Invoke(ctx context.Context, req sdk.InvokeRequest) ([]sdk.ResponseChunk, error) {
+// Invoke streams chunks for an upstream call. Retries are only safe before
+// any chunk has been emitted to the gateway — invokeModel signals that by
+// returning a non-nil error iff it has not written anything to out. Once a
+// chunk crosses the channel boundary the caller has committed; any later
+// upstream error is delivered as an error chunk and Invoke returns nil.
+func (p *plugin) Invoke(ctx context.Context, req sdk.InvokeRequest, out chan<- sdk.ResponseChunk) error {
 	if err := p.ensureManager(ctx); err != nil {
-		return []sdk.ResponseChunk{{Error: upstreamErr("no_model_available", err.Error(), http.StatusServiceUnavailable, true)}}, nil
+		out <- sdk.ResponseChunk{Error: upstreamErr("no_model_available", err.Error(), http.StatusServiceUnavailable, true)}
+		return nil
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < p.maxRetries; attempt++ {
 		modelID := p.modelForRequest(req)
 		if modelID == "" {
-			return []sdk.ResponseChunk{{Error: upstreamErr("no_model_available", "no OpenRouter free model selected", http.StatusServiceUnavailable, true)}}, nil
+			out <- sdk.ResponseChunk{Error: upstreamErr("no_model_available", "no OpenRouter free model selected", http.StatusServiceUnavailable, true)}
+			return nil
 		}
 
-		chunks, err := p.invokeModel(ctx, req, modelID)
+		err := p.invokeModel(ctx, req, modelID, out)
 		if err == nil {
-			return chunks, nil
+			return nil
 		}
 		lastErr = err
 		if !isRetryable(err) || attempt == p.maxRetries-1 {
@@ -121,7 +128,8 @@ func (p *plugin) Invoke(ctx context.Context, req sdk.InvokeRequest) ([]sdk.Respo
 	}
 
 	status := statusCode(lastErr)
-	return []sdk.ResponseChunk{{Error: upstreamErr(upstreamCode(status), lastErr.Error(), status, isRetryable(lastErr))}}, nil
+	out <- sdk.ResponseChunk{Error: upstreamErr(upstreamCode(status), lastErr.Error(), status, isRetryable(lastErr))}
+	return nil
 }
 
 func (p *plugin) ListModels(ctx context.Context) ([]sdk.ModelInfo, error) {
@@ -141,37 +149,42 @@ func (p *plugin) ListModels(ctx context.Context) ([]sdk.ModelInfo, error) {
 	return models, nil
 }
 
-func (p *plugin) invokeModel(ctx context.Context, req sdk.InvokeRequest, modelID string) ([]sdk.ResponseChunk, error) {
+// invokeModel returns a non-nil error only if no chunks were written to out,
+// so the caller can safely retry against the next model. After the first
+// chunk crosses out it has committed; any later failure surfaces as an error
+// chunk and invokeModel returns nil.
+func (p *plugin) invokeModel(ctx context.Context, req sdk.InvokeRequest, modelID string, out chan<- sdk.ResponseChunk) error {
 	body := p.chatRequest(req, modelID)
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	p.addHeaders(httpReq)
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, &temporaryError{err: err}
+		return &temporaryError{err: err}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		msg := readLimit(resp.Body, 4096)
-		return nil, &httpError{status: resp.StatusCode, message: msg}
+		return &httpError{status: resp.StatusCode, message: msg}
 	}
 	if req.Request.Stream {
-		return p.streamChunks(resp.Body, req, modelID), nil
+		return p.streamChunks(ctx, resp.Body, req, modelID, out)
 	}
 
-	var out openAIChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, &temporaryError{err: fmt.Errorf("decode upstream response: %w", err)}
+	var decoded openAIChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return &temporaryError{err: fmt.Errorf("decode upstream response: %w", err)}
 	}
-	return responseChunks(req, modelID, out), nil
+	responseChunks(req, modelID, decoded, out)
+	return nil
 }
 
 func (p *plugin) chatRequest(req sdk.InvokeRequest, modelID string) map[string]any {
@@ -203,8 +216,15 @@ func (p *plugin) chatRequest(req sdk.InvokeRequest, modelID string) map[string]a
 	return body
 }
 
-func (p *plugin) streamChunks(r io.Reader, req sdk.InvokeRequest, modelID string) []sdk.ResponseChunk {
-	var chunks []sdk.ResponseChunk
+func (p *plugin) streamChunks(ctx context.Context, r io.Reader, req sdk.InvokeRequest, modelID string, out chan<- sdk.ResponseChunk) error {
+	send := func(c sdk.ResponseChunk) bool {
+		select {
+		case out <- c:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	s := bufio.NewScanner(r)
 	s.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for s.Scan() {
@@ -224,28 +244,41 @@ func (p *plugin) streamChunks(r io.Reader, req sdk.InvokeRequest, modelID string
 			continue
 		}
 		for _, choice := range ev.Choices {
-			chunks = append(chunks, sdk.ResponseChunk{Chunk: &sdk.ChatCompletionChunk{ID: ev.ID, Object: "chat.completion.chunk", Created: ev.Created, Model: firstString(ev.Model, modelID), Choices: []sdk.ChatChoice{{Index: choice.Index, Delta: sdk.ChatMessage{Role: firstString(choice.Delta.Role, "assistant"), Content: firstString(choice.Delta.Content, choice.Delta.ReasoningContent)}, FinishReason: choice.FinishReason}}}})
+			toolCalls := toSDKToolCalls(choice.Delta.ToolCalls)
+			content := choice.Delta.Content
+			// Skip reasoning fallback when tool_calls are streaming through —
+			// see the upstream-openai plugin for the same trap.
+			if content == "" && len(toolCalls) == 0 {
+				content = choice.Delta.ReasoningContent
+			}
+			if !send(sdk.ResponseChunk{Chunk: &sdk.ChatCompletionChunk{ID: ev.ID, Object: "chat.completion.chunk", Created: ev.Created, Model: firstString(ev.Model, modelID), Choices: []sdk.ChatChoice{{Index: choice.Index, Delta: sdk.ChatMessage{Role: firstString(choice.Delta.Role, "assistant"), Content: content, ToolCalls: toolCalls}, FinishReason: choice.FinishReason}}}}) {
+				return nil
+			}
 		}
 		if ev.Usage.TotalTokens > 0 {
 			usage := sdk.Usage{ProviderInstance: req.Context.PluginInstance, ProviderModel: modelID, InputTokens: ev.Usage.PromptTokens, OutputTokens: ev.Usage.CompletionTokens, TotalTokens: ev.Usage.TotalTokens}
-			chunks = append(chunks, sdk.ResponseChunk{Usage: &usage})
+			if !send(sdk.ResponseChunk{Usage: &usage}) {
+				return nil
+			}
 		}
 	}
 	if err := s.Err(); err != nil {
-		chunks = append(chunks, sdk.ResponseChunk{Error: upstreamErr("upstream_stream_failed", err.Error(), http.StatusBadGateway, true)})
+		send(sdk.ResponseChunk{Error: upstreamErr("upstream_stream_failed", err.Error(), http.StatusBadGateway, true)})
 	}
-	return chunks
+	return nil
 }
 
-func responseChunks(req sdk.InvokeRequest, modelID string, out openAIChatResponse) []sdk.ResponseChunk {
-	chunks := make([]sdk.ResponseChunk, 0, len(out.Choices)+1)
-	for _, choice := range out.Choices {
-		msg := sdk.ChatMessage{Role: firstString(choice.Message.Role, "assistant"), Content: choice.Message.Content}
-		chunks = append(chunks, sdk.ResponseChunk{Chunk: &sdk.ChatCompletionChunk{ID: out.ID, Object: "chat.completion.chunk", Created: out.Created, Model: firstString(out.Model, modelID), Choices: []sdk.ChatChoice{{Index: choice.Index, Message: msg, FinishReason: choice.FinishReason}}}})
+func responseChunks(req sdk.InvokeRequest, modelID string, decoded openAIChatResponse, out chan<- sdk.ResponseChunk) {
+	for _, choice := range decoded.Choices {
+		msg := sdk.ChatMessage{Role: firstString(choice.Message.Role, "assistant"), Content: choice.Message.Content, ToolCalls: toSDKToolCalls(choice.Message.ToolCalls)}
+		finish := choice.FinishReason
+		if len(msg.ToolCalls) > 0 && (finish == "stop" || finish == "") {
+			finish = "tool_calls"
+		}
+		out <- sdk.ResponseChunk{Chunk: &sdk.ChatCompletionChunk{ID: decoded.ID, Object: "chat.completion.chunk", Created: decoded.Created, Model: firstString(decoded.Model, modelID), Choices: []sdk.ChatChoice{{Index: choice.Index, Message: msg, FinishReason: finish}}}}
 	}
-	usage := sdk.Usage{ProviderInstance: req.Context.PluginInstance, ProviderModel: modelID, InputTokens: out.Usage.PromptTokens, OutputTokens: out.Usage.CompletionTokens, TotalTokens: out.Usage.TotalTokens}
-	chunks = append(chunks, sdk.ResponseChunk{Usage: &usage})
-	return chunks
+	usage := sdk.Usage{ProviderInstance: req.Context.PluginInstance, ProviderModel: modelID, InputTokens: decoded.Usage.PromptTokens, OutputTokens: decoded.Usage.CompletionTokens, TotalTokens: decoded.Usage.TotalTokens}
+	out <- sdk.ResponseChunk{Usage: &usage}
 }
 
 func (p *plugin) ensureManager(ctx context.Context) error {
@@ -452,8 +485,9 @@ type openAIChatResponse struct {
 	Choices []struct {
 		Index   int `json:"index"`
 		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role      string           `json:"role"`
+			Content   string           `json:"content"`
+			ToolCalls []openAIToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -472,9 +506,10 @@ type openAIStreamChunk struct {
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Role             string `json:"role"`
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content"`
+			Role             string           `json:"role"`
+			Content          string           `json:"content"`
+			ReasoningContent string           `json:"reasoning_content"`
+			ToolCalls        []openAIToolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -483,6 +518,32 @@ type openAIStreamChunk struct {
 		CompletionTokens int64 `json:"completion_tokens"`
 		TotalTokens      int64 `json:"total_tokens"`
 	} `json:"usage"`
+}
+
+type openAIToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+func toSDKToolCalls(in []openAIToolCall) []sdk.ToolCall {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]sdk.ToolCall, len(in))
+	for i, tc := range in {
+		out[i] = sdk.ToolCall{
+			Index:    tc.Index,
+			ID:       tc.ID,
+			Type:     tc.Type,
+			Function: sdk.ToolCallFunction{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
+		}
+	}
+	return out
 }
 
 type httpError struct {
