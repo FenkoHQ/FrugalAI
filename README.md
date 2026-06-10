@@ -40,6 +40,28 @@ cd frugalai
 go build -o frugalai ./cmd/frugalai
 ```
 
+## Deploy to Cloudflare Workers
+
+A full TypeScript port lives in [`worker/`](worker/) and runs on the Workers
+free plan — no server needed. Model selection state lives in a Durable Object,
+and authentication is mandatory (the worker refuses all traffic until you set
+a credential).
+
+```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler deploy
+
+# required secrets
+npx wrangler secret put OPENROUTER_API_KEY      # your OpenRouter key
+npx wrangler secret put FRUGALAI_PROXY_API_KEY  # any token your clients will send
+```
+
+Then point clients at `https://frugalai.<your-subdomain>.workers.dev/v1` with
+`Authorization: Bearer <your proxy key>`. See [worker/README.md](worker/README.md)
+for the dashboard, tuning vars, and architecture notes.
+
 ## Usage
 
 ### Basic Usage

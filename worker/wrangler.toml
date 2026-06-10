@@ -1,0 +1,35 @@
+name = "frugalai"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── Durable Object: holds model-manager + metrics + logs (the mutex-guarded
+#    in-memory state from the Go version). SQLite-backed DOs run on the free plan.
+[[durable_objects.bindings]]
+name = "PROXY_STATE"
+class_name = "ProxyState"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ProxyState"]
+
+# ── Configuration (mirrors FrugalAI CLI flags / env vars) ──────────────────
+# OPENROUTER_API_KEY is a secret — set it with:
+#   wrangler secret put OPENROUTER_API_KEY
+#
+# AUTH IS MANDATORY (fail-closed): every request — including /health — is
+# rejected with 401 unless it carries a valid credential. Set at least one of:
+#   wrangler secret put FRUGALAI_PROXY_API_KEY   # API token: Authorization: Bearer <key> or x-api-key
+#   wrangler secret put FRUGALAI_UI_BASIC_AUTH   # "user:pass" — HTTP Basic, for the browser dashboard
+# If neither is configured the Worker returns 503 and serves nothing.
+[vars]
+FRUGALAI_MIN_PARAMS = "0"
+FRUGALAI_MIN_POPULARITY = "0"
+FRUGALAI_ENABLE_OPENAI = "true"
+FRUGALAI_ENABLE_ANTHROPIC = "true"
+FRUGALAI_OPENAI_PATH = "/v1"
+FRUGALAI_ANTHROPIC_PATH = "/v1"
+FRUGALAI_CACHE_TTL = "300"
+FRUGALAI_NUM_CANDIDATES = "10"
+# FRUGALAI_PREFERRED_ARCH = "transformer,llama"
+# FRUGALAI_TOP_WEEKLY = "stepfun/step-3.5-flash:free,..."
